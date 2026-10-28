@@ -24,15 +24,15 @@ Para mantener un proyecto modular, limpio y escalable, el código ha sido organi
 
 ```text
 ORION/
-├── main.py                       # 🚀 Lanzador principal multi-versión (v5 por defecto)
-├── main_web_xiao.py              # 🔄 Wrapper de compatibilidad para scripts macOS (.sh)
-├── versions/                     # 📦 Módulos organizados por versión
+├── main.py                       # Lanzador principal multi-versión (v5 por defecto)
+├── main_web_xiao.py              # Wrapper de compatibilidad para scripts macOS (.sh)
+├── versions/                     # Módulos organizados por versión
 │   ├── v1_desktop_initial/       # Versión 1: Desktop OpenCV síncrono inicial
 │   ├── v2_desktop_optimized/     # Versión 2: Desktop multihilo con HUD y telemetría
 │   ├── v3_web_local/             # Versión 3: Servidor Web FastAPI con cámara local
 │   ├── v4_web_esp32/             # Versión 4: Servidor Web con ESP32-CAM AI-Thinker
 │   └── v5_web_xiao_esp32s3/      # Versión 5: Web XIAO ESP32S3 + Hot-Swap + Daemon [ACTUAL]
-├── docs/                         # 📚 Centro de documentación oficial
+├── docs/                         # Centro de documentación oficial
 │   ├── ARCHITECTURE.md           # Arquitectura profunda, IA, streaming y audio
 │   ├── VERSIONS.md               # Comparativa y evolución detallada de v1 a v5
 │   ├── HARDWARE_XIAO_ESP32S3.md  # Conexión, antena y flasheo de XIAO ESP32S3
