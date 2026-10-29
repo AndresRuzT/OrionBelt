@@ -34,6 +34,13 @@ if sys.platform == "win32":
 # Directorio raíz del proyecto
 PROJECT_ROOT = Path(__file__).resolve().parent
 
+# Cargar variables de entorno desde .env si está disponible
+try:
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:
+    pass
+
 VERSIONS = {
     "1": {
         "id": "v1_desktop_initial",
@@ -67,7 +74,7 @@ VERSIONS = {
     },
 }
 
-DEFAULT_VERSION = "5"
+DEFAULT_VERSION = os.getenv("ORION_VERSION", "5")
 
 
 def print_banner():
