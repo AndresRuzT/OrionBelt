@@ -28,3 +28,34 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# =============================================================================
+# ORION v6 Mobile Android
+# =============================================================================
+# Credenciales del firmware (solo se versiona secrets.example.h)
+versions/v6_mobile_android/firmware/**/secrets.h
+
+# Modelo TFLite (33 MB): se descarga con tools/fetch_model.py
+versions/v6_mobile_android/android/app/src/main/assets/*.tflite
+versions/v6_mobile_android/tools/models/
+
+# Entornos Python de herramientas (incluye el temporal de paridad con PyTorch)
+versions/v6_mobile_android/tools/.venv/
+versions/v6_mobile_android/tools/.venv-parity/
+.pytest_cache/
+
+# Android / Gradle
+local.properties
+.gradle/
+.kotlin/
+**/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Espacio de trabajo de agentes
+.superpowers/
