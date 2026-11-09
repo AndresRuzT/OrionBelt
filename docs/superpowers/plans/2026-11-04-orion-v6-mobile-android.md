@@ -122,9 +122,9 @@ A partir de la Fase 3, **Android Studio se queda abierto** con el proyecto `vers
 
 **Archivos:** `tools/fetch_model.py`, `tools/inspect_model.py`.
 
-- [ ] `fetch_model(dest: Path) -> Path`: descarga a `tools/models/` y copia a `android/app/src/main/assets/` si la carpeta existe. Falla si el tamaño ≠ 33 507 904 bytes. Guarda el SHA256 en `tools/models/MODEL_SHA256.txt`.
-- [ ] `inspect_model.py`: imprime nombre, forma, dtype y cuantización de cada tensor de entrada y salida.
-- [ ] **Verificar:** entrada `[1, 256, 256, 3] float32`. La forma de salida (se espera `[1, 256, 256]` o `[1, 256, 256, 1]`) se escribe en el reporte y fija `OUTPUT_SHAPE` para la Fase 4.
+- [x] `fetch_model(dest: Path) -> Path`: descarga a `tools/models/` y copia a `android/app/src/main/assets/` si la carpeta existe. Falla si el tamaño ≠ 33 507 904 bytes. Guarda el SHA256 en `tools/models/MODEL_SHA256.txt`.
+- [x] `inspect_model.py`: imprime nombre, forma, dtype y cuantización de cada tensor de entrada y salida.
+- [x] **Verificar:** entrada `[1, 256, 256, 3] float32`. La forma de salida (se espera `[1, 256, 256]` o `[1, 256, 256, 1]`) se escribe en el reporte y fija `OUTPUT_SHAPE` para la Fase 4.
 
 ### Tarea 1.2: Pipeline de referencia con pruebas
 
@@ -136,31 +136,31 @@ A partir de la Fase 3, **Android Studio se queda abierto** con el proyecto `vers
 - `analyze_zones(depth_norm, near_threshold=0.60, sample_step=4) -> ZoneResult`, donde `ZoneResult` = `action: "STOP"|"FORWARD"`, `intensity: float`, `left: float`, `center: float`, `right: float`, `overall: float`, `nearest_zone: "LEFT"|"CENTER"|"RIGHT"|None`.
   - `action` e `intensity` se calculan **igual que `analyze_depth` de v5** (centro y media global). `left` y `right` son el tercio izquierdo y derecho. `nearest_zone` es la zona con mayor media si supera `near_threshold`, si no `None`.
 
-- [ ] Escribir las pruebas primero:
+- [x] Escribir las pruebas primero:
   - `test_normalize_matches_v5`: con la misma entrada, el resultado coincide con la función de v5 copiada en el test (`np.allclose`, atol 1e-6).
   - `test_flat_scene`: entrada constante → todo cero, `action == "FORWARD"`.
   - `test_center_obstacle_stops`: mapa con bloque 0.9 en el tercio central → `action == "STOP"`, `nearest_zone == "CENTER"`, `intensity > 0`.
   - `test_left_obstacle_zone`: bloque 0.9 solo en el tercio izquierdo → `nearest_zone == "LEFT"` y `action == "FORWARD"` (paridad v5: los laterales no detienen).
   - `test_preprocess_shape_and_stats`: imagen gris 128 → forma `(1,256,256,3)` y valores según la fórmula de ImageNet.
   - `test_model_runs_on_real_image`: `images/portada.jpeg` → salida finita con la forma de la Tarea 1.1.
-- [ ] Correr `pytest` y ver que fallan → implementar → que pasan.
+- [x] Correr `pytest` y ver que fallan → implementar → que pasan.
 
 ### Tarea 1.3: Fixtures y benchmark
 
 **Archivos:** `tools/make_fixtures.py`, `tools/benchmark_pc.py`; salida en `android/app/src/test/resources/fixtures/*.json` (la carpeta se crea en la Fase 3; mientras tanto se guardan en `tools/fixtures/`).
 
-- [ ] Generar 6 fixtures (`flat`, `center`, `left`, `right`, `gradient`, `portada`) con entrada `depth_norm` reducida a 64×64 y el `ZoneResult` esperado.
-- [ ] `benchmark_pc.py`: 100 inferencias en CPU, reporta la mediana y el p95 en ms.
-- [ ] **Verificar:** `pytest` en verde; benchmark impreso; mapa de `portada.jpeg` guardado en PNG coloreado (magma) para inspeccionarlo a simple vista.
+- [x] Generar 6 fixtures (`flat`, `center`, `left`, `right`, `gradient`, `portada`) con entrada `depth_norm` reducida a 64×64 y el `ZoneResult` esperado.
+- [x] `benchmark_pc.py`: 100 inferencias en CPU, reporta la mediana y el p95 en ms.
+- [x] **Verificar:** `pytest` en verde; benchmark impreso; mapa de `portada.jpeg` guardado en PNG coloreado (magma) para inspeccionarlo a simple vista.
 
 ### Tarea 1.4: Paridad TFLite vs PyTorch (aprobada por el usuario, temporal)
 
 **Archivos:** `tools/parity_torch.py` (se borra al terminar).
 
-- [ ] Crear un venv aparte `tools/.venv-parity` con `torch` y `torchvision` **versión CPU** (índice `https://download.pytorch.org/whl/cpu`; unos 200–300 MB frente a los ~2.5 GB de la versión CUDA). Para comparar resultados no hace falta la GPU. Además `timm` y `opencv-python`.
-- [ ] Cargar `MiDaS_small` con `torch.hub` (igual que `load_midas_torch` de v5), procesar `images/portada.jpeg` y las imágenes sintéticas con ambos modelos y comparar `normalize_depth` de cada uno, redimensionados a 256×256.
-- [ ] **Criterio:** correlación de Pearson ≥ 0.98 y el mismo `action`/`nearest_zone` en todas las imágenes. Reportar el error absoluto medio.
-- [ ] **Limpieza:** borrar `tools/.venv-parity`, la caché de `torch.hub` (`%USERPROFILE%\.cache\torch\hub`, pesos de MiDaS y el repo clonado) y la caché de pip (`pip cache purge`). Reportar el espacio liberado comparando el disco libre antes y después.
+- [x] Crear un venv aparte `tools/.venv-parity` con `torch` y `torchvision` **versión CPU** (índice `https://download.pytorch.org/whl/cpu`; unos 200–300 MB frente a los ~2.5 GB de la versión CUDA). Para comparar resultados no hace falta la GPU. Además `timm` y `opencv-python`.
+- [x] Cargar `MiDaS_small` con `torch.hub` (igual que `load_midas_torch` de v5), procesar `images/portada.jpeg` y las imágenes sintéticas con ambos modelos y comparar `normalize_depth` de cada uno, redimensionados a 256×256.
+- [x] **Criterio:** correlación de Pearson ≥ 0.98 y el mismo `action`/`nearest_zone` en todas las imágenes. Reportar el error absoluto medio.
+- [x] **Limpieza:** borrar `tools/.venv-parity`, la caché de `torch.hub` (`%USERPROFILE%\.cache\torch\hub`, pesos de MiDaS y el repo clonado) y la caché de pip (`pip cache purge`). Reportar el espacio liberado comparando el disco libre antes y después.
 
 **Cierre de Fase 1 (momento A):** reporte con tensores, latencia en PC, imagen de profundidad y pruebas. Propuesta de commit `feat(v6): pipeline de referencia MiDaS TFLite y fixtures`. **Espero tu autorización.**
 
