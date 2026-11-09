@@ -198,32 +198,32 @@ A partir de la Fase 3, **Android Studio se queda abierto** con el proyecto `vers
 
 ### Tarea 3.1: Crear el proyecto (momento C, lo haces tú en Android Studio)
 
-- [ ] **File → New → New Project → Empty Activity** (Compose).
+- [x] **File → New → New Project → Empty Activity** (Compose).
   - Name: `ORION` · Package name: `com.audacia.orion`
   - Save location: `C:\Users\jchrn\Documents\Trabajos\AudacIA\OrionBelt\versions\v6_mobile_android\android`
   - Language: Kotlin · Minimum SDK: **API 26** · Build configuration language: **Kotlin DSL**
-- [ ] Esperar el *Gradle Sync* (barra inferior) y avisarme. Esto deja el Gradle Wrapper y las versiones de AGP/Kotlin compatibles con tu Android Studio.
+- [x] Esperar el *Gradle Sync* (barra inferior) y avisarme. Esto deja el Gradle Wrapper y las versiones de AGP/Kotlin compatibles con tu Android Studio.
 
 ### Tarea 3.2: Configuración (lo hago yo)
 
 **Archivos:** `android/gradle/libs.versions.toml`, `android/app/build.gradle.kts`, `AndroidManifest.xml`, `res/xml/network_security_config.xml`.
 
-- [ ] Dependencias: LiteRT (`com.google.ai.edge.litert:litert` + `litert-gpu`), OkHttp, `kotlinx-coroutines-android`, JUnit 4, `org.json` para tests en JVM. `androidResources { noCompress += "tflite" }`.
-- [ ] Manifest: `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE`, `CHANGE_WIFI_MULTICAST_STATE`, `WAKE_LOCK`, `VIBRATE`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `POST_NOTIFICATIONS`.
-- [ ] `network_security_config.xml`: permitir HTTP sin cifrar (el XIAO no usa HTTPS). Desde Android 9 está bloqueado por defecto y sin esto el stream no abre.
-- [ ] Copiar el modelo a `assets/` con `tools/fetch_model.py` y los fixtures de la Fase 1 a `app/src/test/resources/fixtures/`.
+- [x] Dependencias: LiteRT/TFLite (`org.tensorflow:tensorflow-lite` + `tensorflow-lite-gpu`), OkHttp, `kotlinx-coroutines-android`, JUnit 4, `org.json` para tests en JVM. `androidResources { noCompress += "tflite" }`.
+- [x] Manifest: `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE`, `CHANGE_WIFI_MULTICAST_STATE`, `WAKE_LOCK`, `VIBRATE`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `POST_NOTIFICATIONS`.
+- [x] `network_security_config.xml`: permitir HTTP sin cifrar (el XIAO no usa HTTPS). Desde Android 9 está bloqueado por defecto y sin esto el stream no abre.
+- [x] Copiar el modelo a `assets/` y los fixtures de la Fase 1 a `app/src/test/resources/fixtures/`. Smoke test `ModelAssetSmokeTest` ejecutado y pasando.
 
 ### Tarea 3.3: Primer despliegue (momento D)
 
-- [ ] Tú: depuración USB activada, celular conectado, aceptas la huella RSA.
-- [ ] **Verificar:**
-  - `adb devices` → tu celular aparece como `device`.
+- [x] Tú: depuración USB activada, celular conectado, aceptas la huella RSA.
+- [x] **Verificar:**
+  - `adb devices` → tu celular aparece como `device` (TECNO CK7n, arm64-v8a, Android 14 API 34).
   - `.\gradlew.bat assembleDebug` → `BUILD SUCCESSFUL`.
   - `.\gradlew.bat testDebugUnitTest` → pasa (prueba de humo: el modelo existe en `assets/` y pesa 33 507 904 bytes).
   - `.\gradlew.bat installDebug` → la app abre en el celular y muestra "ORION v6" con el modelo, la versión de Android y el SoC detectado.
   - Desconectas el cable y la app sigue abriendo (comprueba que es independiente de la PC).
 
-**Cierre de Fase 3:** reporte + commit propuesto `feat(v6): esqueleto Android con LiteRT, permisos y modelo`. **Espero tu autorización.**
+**Cierre de Fase 3:** reporte + commit ejecutado `feat(v6): esqueleto Android con TFLite, permisos y modelo`.
 
 ---
 
