@@ -170,14 +170,15 @@ A partir de la Fase 3, **Android Studio se queda abierto** con el proyecto `vers
 
 **Entregable:** un sketch v6 que se conecta a la Zona Wi-Fi del celular, con credenciales fuera de Git, faro UDP activo y IP estática opcional.
 
-### Tarea 2.1: Sketch v6 con secretos externos
+### Tarea 2.1: Sketch v6 con secretos externos y multi-red con prioridad
 
-**Archivos:** copiar `versions/v5_web_xiao_esp32s3/firmware/XIAO_Camera_Orion/*` → `versions/v6_mobile_android/firmware/XIAO_Camera_Orion_Mobile/`; renombrar el `.ino`; crear `secrets.example.h` y `secrets.h`.
+**Archivos:** `versions/v6_mobile_android/firmware/XIAO_Camera_Orion_Mobile/*`.
 
-- [ ] `secrets.example.h` define `ORION_WIFI_SSID`, `ORION_WIFI_PASS`, `ORION_USE_STATIC_IP` (0 por defecto), `ORION_STATIC_IP`, `ORION_GATEWAY`, `ORION_SUBNET`.
-- [ ] El `.ino` hace `#include "secrets.h"`. Si `ORION_USE_STATIC_IP == 1` llama a `WiFi.config(...)` antes de `WiFi.begin`.
-- [ ] Faro: además del broadcast `255.255.255.255`, emitir al broadcast de la subred (`localIP | ~subnetMask`) porque algunos Android filtran el broadcast limitado. Mismo formato `ORION_XIAO_CAM:<IP>:81`.
-- [ ] Mientras no haya cliente de stream, el faro se emite cada **1 s** (antes 3 s) para que la app lo encuentre rápido. Se sigue silenciando mientras se transmite video (igual que v5).
+- [x] `secrets.example.h` define arreglo `KNOWN_NETWORKS` con prioridad estricta, `NUM_KNOWN_NETWORKS` y configuración estática opcional.
+- [x] `secrets.h` activo local con las 3 redes configuradas (Celular principal 'a' en P1, Celular 2 en P2, Audacia en P3). Blindado e ignorado por Git.
+- [x] El `.ino` implementa algoritmo híbrido Fast-Probe (1.5-2.5s a P1) + Escaneo de espectro en orden de prioridad para P2 y P3.
+- [x] Faro UDP en puerto 9999: emite doble broadcast (`255.255.255.255` y `localIP | ~subnetMask`) cada 1 segundo cuando no hay clientes de stream para enlace instantáneo en Android.
+- [x] Watchdog en `loop()`: detecta desconexión y reconecta automáticamente por prioridad sin colgar la cámara ni resetear el microcontrolador.
 - [ ] Al perder el Wi-Fi, reintentar sin reiniciar la placa (ya existe `setAutoReconnect(true)`; se verifica en la prueba).
 
 ### Tarea 2.2: Validación con hardware (momento B)
