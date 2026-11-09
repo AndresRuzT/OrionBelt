@@ -5,6 +5,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
+import com.audacia.orion.feedback.FeedbackCoordinator
+import com.audacia.orion.feedback.FeedbackSettings
 import com.audacia.orion.net.MjpegStreamReader
 import com.audacia.orion.net.XiaoDiscovery
 import com.audacia.orion.net.XiaoEndpoint
@@ -13,11 +15,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -47,6 +49,7 @@ class VisionPipeline(
     private val preprocessor = Preprocessor()
     private val discovery = XiaoDiscovery(context)
     private val streamReader = MjpegStreamReader()
+    val feedback = FeedbackCoordinator(context)
 
     private var pipelineJob: Job? = null
     private var demoJob: Job? = null
@@ -86,56 +89,52 @@ class VisionPipeline(
         initEstimator(backend)
     }
 
+    fun updateFeedbackSettings(settings: FeedbackSettings) {
+        feedback.settings = settings
+        _state.update { it.copy(feedbackSettings = settings) }
+    }
+
     /**
-     * Inicia el autodescubrimiento por UDP y se conecta automáticamente al encontrar el XIAO.
-     * Si existe una IP previa guardada, prueba primero un sondeo rápido (probe HTTP).
+     * Inicia el autodescubrimiento continuo y supervisor de reconexión.
+     * Combina en paralelo el sondeo rápido HTTP (a la última IP conocida) y la escucha
+     * de faros UDP en el puerto 9999, logrando enlaces instantáneos (<1.5s).
      */
     fun startAutoDiscovery() {
-        stop()
+        stop(silent = true)
         pipelineJob = scope.launch(Dispatchers.IO) {
-            _state.update {
-                it.copy(
-                    connectionStatus = ConnectionStatus.SEARCHING,
-                    statusMessage = "Buscando cámara (última IP o faro UDP)..."
-                )
-            }
+            while (isActive) {
+                _state.update {
+                    it.copy(
+                        connectionStatus = ConnectionStatus.SEARCHING,
+                        statusMessage = "Buscando cámara (sonda rápida o faro UDP)..."
+                    )
+                }
 
-            // 1. Probar primero la última IP conocida para conexión instantánea
-            val last = discovery.getLastKnownEndpoint()
-            if (last != null) {
-                val ok = discovery.probe(last)
-                if (ok && isActive) {
+                // 1. Descubrir endpoint
+                val endpoint = try {
+                    findEndpoint()
+                } catch (e: CancellationException) {
+                    break
+                }
+
+                if (!isActive) break
+
+                // 2. Transmitir stream desde el endpoint descubierto
+                try {
+                    streamFromEndpoint(endpoint)
+                } catch (e: CancellationException) {
+                    break
+                }
+
+                // 3. Si el stream se interrumpió y seguimos activos, esperar brevemente antes de reintentar
+                if (isActive) {
                     _state.update {
                         it.copy(
-                            endpoint = last,
-                            connectionStatus = ConnectionStatus.CONNECTING,
-                            statusMessage = "Cámara reconocida en ${last.ip}. Conectando..."
+                            connectionStatus = ConnectionStatus.SEARCHING,
+                            statusMessage = "Conexión perdida. Reintentando autoconexión..."
                         )
                     }
-                    connectToEndpoint(last)
-                    return@launch
-                }
-            }
-
-            // 2. Escuchar faros UDP emitidos por el XIAO en el puerto 9999
-            try {
-                val endpoint = discovery.listenBeacons().first()
-                _state.update {
-                    it.copy(
-                        endpoint = endpoint,
-                        connectionStatus = ConnectionStatus.CONNECTING,
-                        statusMessage = "Faro recibido desde ${endpoint.ip}. Conectando stream..."
-                    )
-                }
-                connectToEndpoint(endpoint)
-            } catch (e: CancellationException) {
-                // Cancelación normal
-            } catch (e: Exception) {
-                _state.update {
-                    it.copy(
-                        connectionStatus = ConnectionStatus.ERROR,
-                        statusMessage = "Fallo en descubrimiento: ${e.message}"
-                    )
+                    delay(1200)
                 }
             }
         }
@@ -145,51 +144,121 @@ class VisionPipeline(
      * Conexión directa a un endpoint conocido (por IP y puerto de stream).
      */
     fun connectDirect(ip: String, streamPort: Int = 81) {
-        stop()
+        stop(silent = true)
         val endpoint = XiaoEndpoint(ip = ip.trim(), streamPort = streamPort)
         discovery.saveLastKnownEndpoint(endpoint)
         pipelineJob = scope.launch(Dispatchers.IO) {
-            connectToEndpoint(endpoint)
+            while (isActive) {
+                try {
+                    streamFromEndpoint(endpoint)
+                } catch (e: CancellationException) {
+                    break
+                }
+                if (isActive) {
+                    delay(1500)
+                }
+            }
         }
     }
 
-    private suspend fun connectToEndpoint(endpoint: XiaoEndpoint) {
+    /**
+     * Localiza el endpoint de la cámara combinando:
+     * - Sondeo HTTP inmediato a la última IP conocida.
+     * - Sondeo periódico concurrente (cada 1200 ms).
+     * - Escucha pasiva continua de faros UDP (puerto 9999).
+     */
+    private suspend fun findEndpoint(): XiaoEndpoint = coroutineScope {
+        val last = discovery.getLastKnownEndpoint()
+        if (last != null && discovery.probe(last)) {
+            return@coroutineScope last
+        }
+
+        val foundChannel = Channel<XiaoEndpoint>(Channel.CONFLATED)
+
+        // Tarea A: Sondeo periódico de la última IP
+        val probeJob = if (last != null) {
+            launch(Dispatchers.IO) {
+                while (isActive) {
+                    delay(1200)
+                    if (discovery.probe(last)) {
+                        foundChannel.trySend(last)
+                        break
+                    }
+                }
+            }
+        } else null
+
+        // Tarea B: Escucha de faros UDP emitidos por el firmware
+        val beaconJob = launch(Dispatchers.IO) {
+            try {
+                discovery.listenBeacons().collect { endpoint ->
+                    foundChannel.trySend(endpoint)
+                }
+            } catch (e: CancellationException) {
+                // Cancelación normal
+            } catch (ignored: Exception) {
+            }
+        }
+
+        try {
+            foundChannel.receive()
+        } finally {
+            probeJob?.cancel()
+            beaconJob.cancel()
+        }
+    }
+
+    /**
+     * Abre el flujo MJPEG desde el endpoint.
+     * Anuncia "Cámara conectada" ÚNICAMENTE cuando se recibe exitosamente el primer frame de video,
+     * eliminando cualquier bucle o falso positivo cuando la cámara está apagándose.
+     */
+    private suspend fun streamFromEndpoint(endpoint: XiaoEndpoint): Boolean {
         discovery.saveLastKnownEndpoint(endpoint)
         _state.update {
             it.copy(
                 endpoint = endpoint,
                 connectionStatus = ConnectionStatus.CONNECTING,
-                statusMessage = "Abriendo stream en ${endpoint.streamUrl}..."
+                statusMessage = "Conectando stream en ${endpoint.streamUrl}..."
             )
         }
 
         // Iniciar consumidor de inferencia
         val consumerJob = scope.launch(Dispatchers.Default) {
-            runInferenceLoop()
+            runInferenceLoop(endpoint)
         }
 
+        var hasDeliveredFrame = false
         try {
-            _state.update {
-                it.copy(
-                    connectionStatus = ConnectionStatus.STREAMING,
-                    statusMessage = "Stream activo (${endpoint.ip})"
-                )
-            }
-
             // Flujo productor de frames desde MJPEG
             streamReader.streamFrames(endpoint).collect { frameBytes ->
+                if (!hasDeliveredFrame) {
+                    hasDeliveredFrame = true
+                    _state.update {
+                        it.copy(
+                            connectionStatus = ConnectionStatus.STREAMING,
+                            statusMessage = "Stream activo (${endpoint.ip})"
+                        )
+                    }
+                    feedback.onCameraConnected()
+                }
                 // Channel.CONFLATED descarta automáticamente frames acumulados si el consumidor está ocupado
                 frameChannel.trySend(frameBytes)
             }
+            return true
         } catch (e: CancellationException) {
-            // Cancelado intencionalmente
+            throw e
         } catch (e: Exception) {
+            if (hasDeliveredFrame) {
+                feedback.onCameraDisconnected()
+            }
             _state.update {
                 it.copy(
                     connectionStatus = ConnectionStatus.ERROR,
                     statusMessage = "Stream interrumpido: ${e.message}"
                 )
             }
+            return false
         } finally {
             consumerJob.cancel()
         }
@@ -198,7 +267,7 @@ class VisionPipeline(
     /**
      * Bucle de procesamiento de frames en tiempo real.
      */
-    private suspend fun runInferenceLoop() {
+    private suspend fun runInferenceLoop(endpoint: XiaoEndpoint?) {
         var frameCount = 0L
         var fpsLastTime = System.currentTimeMillis()
         var fpsFrameCounter = 0
@@ -229,7 +298,10 @@ class VisionPipeline(
             val normDepth = DepthAnalyzer.normalize(rawDepth)
             val zoneResult = DepthAnalyzer.analyze(normDepth, 256, 256)
 
-            // 5. Generación de mapa de calor Magma
+            // 5. Retroalimentación sensorial (háptica, audio estéreo, buzzer)
+            val alert = feedback.processFrameResult(zoneResult, endpoint)
+
+            // 6. Generación de mapa de calor Magma
             val colorizedBitmap = MagmaColorizer.toBitmap(
                 depthNorm = normDepth,
                 width = 256,
@@ -239,7 +311,7 @@ class VisionPipeline(
             )
             depthBitmap = colorizedBitmap
 
-            // 6. Cálculo de FPS y latencia total
+            // 7. Cálculo de FPS y latencia total
             val totalEnd = System.nanoTime()
             val totalLatencyMs = (totalEnd - totalStart) / 1_000_000
             frameCount++
@@ -258,6 +330,7 @@ class VisionPipeline(
                     cameraBitmap = cameraBitmap,
                     depthBitmap = colorizedBitmap,
                     zoneResult = zoneResult,
+                    activeAlert = alert,
                     inferenceMs = inferMs,
                     totalLatencyMs = totalLatencyMs,
                     fps = currentFps,
@@ -313,6 +386,7 @@ class VisionPipeline(
 
                     val normDepth = DepthAnalyzer.normalize(rawDepth)
                     val zoneResult = DepthAnalyzer.analyze(normDepth, 256, 256)
+                    val alert = feedback.processFrameResult(zoneResult, null)
 
                     val colorized = MagmaColorizer.toBitmap(
                         depthNorm = normDepth,
@@ -340,6 +414,7 @@ class VisionPipeline(
                             cameraBitmap = testBitmap,
                             depthBitmap = colorized,
                             zoneResult = zoneResult,
+                            activeAlert = alert,
                             inferenceMs = inferMs,
                             totalLatencyMs = totalLatencyMs,
                             fps = currentFps,
@@ -417,7 +492,9 @@ class VisionPipeline(
         resultSummary
     }
 
-    fun stop() {
+    fun stop(silent: Boolean = false) {
+        val wasConnected = _state.value.connectionStatus == ConnectionStatus.STREAMING ||
+                _state.value.connectionStatus == ConnectionStatus.CONNECTING
         pipelineJob?.cancel()
         pipelineJob = null
         demoJob?.cancel()
@@ -428,10 +505,14 @@ class VisionPipeline(
                 statusMessage = "Detenido"
             )
         }
+        if (wasConnected && !silent) {
+            feedback.onCameraDisconnected()
+        }
     }
 
     override fun close() {
-        stop()
+        stop(silent = true)
+        feedback.close()
         depthEstimator?.close()
     }
 }

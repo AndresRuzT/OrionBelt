@@ -3,6 +3,7 @@ package com.audacia.orion.ui
 import android.graphics.Bitmap
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -28,6 +29,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -45,11 +47,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.audacia.orion.R
+import com.audacia.orion.feedback.Alert
+import com.audacia.orion.feedback.FeedbackSettings
 import com.audacia.orion.vision.Action
 import com.audacia.orion.vision.ConnectionStatus
 import com.audacia.orion.vision.InferenceBackend
@@ -63,17 +69,13 @@ fun HudScreen(
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.state.collectAsState()
-    var showIpDialog by remember { mutableStateOf(false) }
-    var manualIp by remember { mutableStateOf("192.168.43.100") }
-    var showBenchmarkDialog by remember { mutableStateOf(false) }
-
     val scrollState = rememberScrollState()
 
     Column(
         modifier = modifier
             .fillMaxSize()
             .background(Color(0xFF0B0F19))
-            .padding(16.dp)
+            .padding(14.dp)
             .verticalScroll(scrollState),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -83,117 +85,71 @@ fun HudScreen(
             onBackendToggle = {
                 val next = if (state.activeBackend == InferenceBackend.GPU) InferenceBackend.CPU else InferenceBackend.GPU
                 viewModel.switchBackend(next)
-            },
-            onRunBenchmark = {
-                viewModel.runBenchmark {
-                    showBenchmarkDialog = true
-                }
             }
         )
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        // --- 2. BANNER DE ALERTA ESPACIAL (FORWARD / STOP) ---
-        ActionAlertBanner(zoneResult = state.zoneResult)
+        // --- 2. BANNER DE NAVEGACIÓN Y ALERTA (FORWARD / STOP) ---
+        ActionAlertBanner(
+            zoneResult = state.zoneResult,
+            alert = state.activeAlert
+        )
 
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
 
-        // --- 3. TELEMETRÍA (FPS, LATENCIA, ENDPOINT) ---
+        // --- 3. TELEMETRÍA (FPS, INFERENCIA, LATENCIA) ---
         TelemetryRow(state = state)
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // --- 4. VISUALES: CÁMARA EN VIVO Y MAPA MAGMA DE PROFUNDIDAD ---
+        // --- 4. VISUALES: STREAM DE CÁMARA Y MAPA MAGMA ---
         VisualStreamsSection(
             cameraBitmap = state.cameraBitmap,
             depthBitmap = state.depthBitmap
         )
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
         // --- 5. BARRAS ESPACIALES POR ZONAS (IZQ, CENTRO, DER) ---
         SpatialZonesCard(zoneResult = state.zoneResult)
 
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // --- 6. CONTROLES DE CONEXIÓN Y DEMO ---
-        ControlButtonsSection(
-            status = state.connectionStatus,
-            onAutoDiscover = { viewModel.startAutoDiscovery() },
-            onStartDemo = { viewModel.startDemo() },
-            onDirectIp = { showIpDialog = true },
-            onStop = { viewModel.stop() }
-        )
-
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Estado textual / debug footer
+        // --- 6. RETROALIMENTACIÓN SENSORIAL (TIRA COMPACTA PROFESIONAL) ---
+        SensoryFeedbackCard(
+            settings = state.feedbackSettings,
+            onUpdateSettings = { viewModel.updateFeedbackSettings(it) }
+        )
+
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // --- 7. CONTROLES DE ENLACE ---
+        ControlButtonsSection(
+            status = state.connectionStatus,
+            onToggleAutoSearch = {
+                if (state.connectionStatus == ConnectionStatus.SEARCHING ||
+                    state.connectionStatus == ConnectionStatus.CONNECTING ||
+                    state.connectionStatus == ConnectionStatus.STREAMING
+                ) {
+                    viewModel.stop()
+                } else {
+                    viewModel.startAutoDiscovery()
+                }
+            },
+            onRefreshSearch = { viewModel.startAutoDiscovery() },
+            onDisconnect = { viewModel.stop() }
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Estado textual del sistema
         Text(
             text = state.statusMessage,
             color = Color(0xFF64748B),
-            fontSize = 11.sp,
+            fontSize = 10.sp,
             fontFamily = FontFamily.Monospace,
             textAlign = TextAlign.Center
-        )
-    }
-
-    // Diálogo de IP manual
-    if (showIpDialog) {
-        AlertDialog(
-            onDismissRequest = { showIpDialog = false },
-            title = { Text("Conexión Directa al XIAO") },
-            text = {
-                Column {
-                    Text(
-                        "Introduce la dirección IPv4 del XIAO ESP32S3 conectada a la Zona Wi-Fi:",
-                        fontSize = 13.sp,
-                        color = Color(0xFFCBD5E1)
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = manualIp,
-                        onValueChange = { manualIp = it },
-                        label = { Text("IP de la Cámara") },
-                        singleLine = true
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showIpDialog = false
-                        viewModel.connectDirect(manualIp)
-                    }
-                ) {
-                    Text("Conectar")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showIpDialog = false }) {
-                    Text("Cancelar")
-                }
-            }
-        )
-    }
-
-    // Diálogo de resultados del Benchmark
-    if (showBenchmarkDialog && state.benchmarkSummary != null) {
-        AlertDialog(
-            onDismissRequest = { showBenchmarkDialog = false },
-            title = { Text("⚡ Benchmark TFLite (50 iteraciones)") },
-            text = {
-                Text(
-                    text = state.benchmarkSummary ?: "",
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 13.sp,
-                    color = Color(0xFFE2E8F0)
-                )
-            },
-            confirmButton = {
-                Button(onClick = { showBenchmarkDialog = false }) {
-                    Text("Cerrar")
-                }
-            }
         )
     }
 }
@@ -201,8 +157,7 @@ fun HudScreen(
 @Composable
 fun TopHudHeader(
     state: VisionState,
-    onBackendToggle: () -> Unit,
-    onRunBenchmark: () -> Unit
+    onBackendToggle: () -> Unit
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -212,64 +167,68 @@ fun TopHudHeader(
         Row(verticalAlignment = Alignment.CenterVertically) {
             val statusDotColor = when (state.connectionStatus) {
                 ConnectionStatus.STREAMING -> Color(0xFF10B981) // Verde
-                ConnectionStatus.DEMO_MODE -> Color(0xFF38BDF8) // Azul
                 ConnectionStatus.SEARCHING -> Color(0xFFF59E0B) // Ámbar
                 ConnectionStatus.CONNECTING -> Color(0xFF6366F1) // Índigo
                 ConnectionStatus.ERROR -> Color(0xFFEF4444) // Rojo
-                ConnectionStatus.IDLE -> Color(0xFF64748B) // Gris
+                ConnectionStatus.IDLE, ConnectionStatus.DEMO_MODE -> Color(0xFF64748B) // Gris
             }
 
             Box(
                 modifier = Modifier
-                    .size(10.dp)
+                    .size(8.dp)
                     .background(statusDotColor, CircleShape)
             )
             Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = "ORION v6",
-                color = Color.White,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace
-            )
-        }
-
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // Chip de Backend (GPU / CPU)
-            val backendColor = if (state.activeBackend == InferenceBackend.GPU) Color(0xFF10B981) else Color(0xFFF59E0B)
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(backendColor.copy(alpha = 0.18f))
-                    .border(1.dp, backendColor, RoundedCornerShape(8.dp))
-                    .clickable { onBackendToggle() }
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
-            ) {
+            Column {
                 Text(
-                    text = state.activeBackend.name,
-                    color = backendColor,
-                    fontSize = 12.sp,
+                    text = "ORION v6",
+                    color = Color.White,
+                    fontSize = 17.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = FontFamily.Monospace
                 )
-            }
-
-            Spacer(modifier = Modifier.width(8.dp))
-
-            // Botón rápido de Benchmark
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(Color(0xFF1E293B))
-                    .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
-                    .clickable { onRunBenchmark() }
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
-            ) {
+                val statusLabel = when (state.connectionStatus) {
+                    ConnectionStatus.STREAMING -> "STREAM EN VIVO"
+                    ConnectionStatus.SEARCHING -> "BUSCANDO CÁMARA..."
+                    ConnectionStatus.CONNECTING -> "CONECTANDO..."
+                    ConnectionStatus.ERROR -> "ERROR DE ENLACE"
+                    ConnectionStatus.IDLE -> "EN ESPERA"
+                    ConnectionStatus.DEMO_MODE -> "MODO DEMO"
+                }
                 Text(
-                    text = "⚡ TEST",
-                    color = Color(0xFF38BDF8),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold
+                    text = statusLabel,
+                    color = statusDotColor,
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+
+        // Chip selector de Backend (GPU / CPU)
+        val isGpu = state.activeBackend == InferenceBackend.GPU
+        val backendColor = if (isGpu) Color(0xFF10B981) else Color(0xFFF59E0B)
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(6.dp))
+                .background(backendColor.copy(alpha = 0.15f))
+                .border(1.dp, backendColor.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                .clickable { onBackendToggle() }
+                .padding(horizontal = 10.dp, vertical = 5.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(5.dp)
+                        .background(backendColor, CircleShape)
+                )
+                Spacer(modifier = Modifier.width(5.dp))
+                Text(
+                    text = if (isGpu) "GPU ACCEL" else "CPU (4H)",
+                    color = backendColor,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
                 )
             }
         }
@@ -277,7 +236,10 @@ fun TopHudHeader(
 }
 
 @Composable
-fun ActionAlertBanner(zoneResult: ZoneResult?) {
+fun ActionAlertBanner(
+    zoneResult: ZoneResult?,
+    alert: Alert?
+) {
     val isStop = zoneResult?.action == Action.STOP
     val bgColor by animateColorAsState(
         targetValue = if (isStop) Color(0xFFDC2626) else Color(0xFF047857),
@@ -293,36 +255,52 @@ fun ActionAlertBanner(zoneResult: ZoneResult?) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 12.dp, horizontal = 16.dp),
+                .padding(vertical = 10.dp, horizontal = 14.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
-                Text(
-                    text = if (isStop) "🚨 STOP DETECTADO" else "✓ AVANZAR",
-                    color = Color.White,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    fontFamily = FontFamily.Monospace
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    painter = painterResource(if (isStop) R.drawable.ic_alert_stop else R.drawable.ic_forward),
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp)
                 )
-                Text(
-                    text = if (isStop) {
-                        val zoneName = zoneResult?.nearestZone?.name ?: "OBSTÁCULO FRONTAL"
-                        "Zona crítica: $zoneName"
-                    } else {
-                        "Trayectoria libre de obstáculos"
-                    },
-                    color = Color.White.copy(alpha = 0.85f),
-                    fontSize = 12.sp
-                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = if (isStop) "STOP DETECTADO" else "AVANZAR",
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = if (isStop) {
+                            if (alert != null) {
+                                "Nivel ${alert.level} (${alert.intervalMs} ms) • Zona ${alert.zone.name}"
+                            } else {
+                                val zoneName = zoneResult?.nearestZone?.name ?: "OBSTÁCULO FRONTAL"
+                                "Zona crítica: $zoneName"
+                            }
+                        } else {
+                            "Trayectoria libre de obstáculos"
+                        },
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 11.sp
+                    )
+                }
             }
 
             if (isStop) {
-                val pct = (zoneResult.intensity * 100).toInt()
+                val pct = ((zoneResult?.intensity ?: 0f) * 100).toInt()
                 Text(
                     text = "$pct%",
                     color = Color.White,
-                    fontSize = 24.sp,
+                    fontSize = 20.sp,
                     fontWeight = FontWeight.Black,
                     fontFamily = FontFamily.Monospace
                 )
@@ -367,19 +345,19 @@ fun MetricCard(
 ) {
     Card(
         modifier = modifier,
-        shape = RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(containerColor = Color(0xFF131C31))
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text(text = label, color = Color(0xFF64748B), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            Text(text = label, color = Color(0xFF64748B), fontSize = 9.sp, fontWeight = FontWeight.Bold)
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = value,
                 color = color,
-                fontSize = 14.sp,
+                fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace
             )
@@ -399,7 +377,7 @@ fun VisualStreamsSection(
         // Vista de Cámara
         StreamCard(
             modifier = Modifier.weight(1f),
-            title = "CAMARA (XIAO)",
+            title = "CÁMARA (XIAO)",
             bitmap = cameraBitmap
         )
 
@@ -420,26 +398,26 @@ fun StreamCard(
 ) {
     Card(
         modifier = modifier,
-        shape = RoundedCornerShape(12.dp),
+        shape = RoundedCornerShape(10.dp),
         colors = CardDefaults.cardColors(containerColor = Color(0xFF131C31))
     ) {
         Column(
-            modifier = Modifier.padding(8.dp),
+            modifier = Modifier.padding(6.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
                 text = title,
                 color = Color(0xFF94A3B8),
-                fontSize = 10.sp,
+                fontSize = 9.sp,
                 fontWeight = FontWeight.SemiBold,
                 fontFamily = FontFamily.Monospace
             )
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(4.dp))
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(1f)
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(6.dp))
                     .background(Color(0xFF090D16)),
                 contentAlignment = Alignment.Center
             ) {
@@ -454,7 +432,7 @@ fun StreamCard(
                     Text(
                         text = "Sin señal",
                         color = Color(0xFF475569),
-                        fontSize = 12.sp,
+                        fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace
                     )
                 }
@@ -470,24 +448,24 @@ fun SpatialZonesCard(zoneResult: ZoneResult?) {
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = Color(0xFF131C31))
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
+        Column(modifier = Modifier.padding(12.dp)) {
             Text(
                 text = "SEGMENTACIÓN ESPACIAL POR ZONAS",
                 color = Color(0xFF94A3B8),
-                fontSize = 11.sp,
+                fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = FontFamily.Monospace
             )
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(8.dp))
 
             val left = zoneResult?.left ?: 0.0f
             val center = zoneResult?.center ?: 0.0f
             val right = zoneResult?.right ?: 0.0f
 
             ZoneProgressBar(name = "IZQUIERDA", value = left, isNearest = zoneResult?.nearestZone == Zone.LEFT)
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(5.dp))
             ZoneProgressBar(name = "CENTRO", value = center, isNearest = zoneResult?.nearestZone == Zone.CENTER)
-            Spacer(modifier = Modifier.height(6.dp))
+            Spacer(modifier = Modifier.height(5.dp))
             ZoneProgressBar(name = "DERECHA", value = right, isNearest = zoneResult?.nearestZone == Zone.RIGHT)
         }
     }
@@ -512,18 +490,18 @@ fun ZoneProgressBar(
         Text(
             text = name,
             color = if (isNearest) Color(0xFFEF4444) else Color(0xFF94A3B8),
-            fontSize = 11.sp,
+            fontSize = 10.sp,
             fontWeight = if (isNearest) FontWeight.Bold else FontWeight.Normal,
             fontFamily = FontFamily.Monospace,
-            modifier = Modifier.width(90.dp)
+            modifier = Modifier.width(80.dp)
         )
 
         LinearProgressIndicator(
             progress = { value.coerceIn(0f, 1f) },
             modifier = Modifier
                 .weight(1f)
-                .height(8.dp)
-                .clip(RoundedCornerShape(4.dp)),
+                .height(6.dp)
+                .clip(RoundedCornerShape(3.dp)),
             color = barColor,
             trackColor = Color(0xFF1E293B)
         )
@@ -533,70 +511,257 @@ fun ZoneProgressBar(
         Text(
             text = "${(value * 100).toInt()}%",
             color = Color.White,
-            fontSize = 11.sp,
+            fontSize = 10.sp,
             fontFamily = FontFamily.Monospace,
-            modifier = Modifier.width(36.dp),
+            modifier = Modifier.width(32.dp),
             textAlign = TextAlign.End
         )
     }
 }
 
 @Composable
+fun SensoryFeedbackCard(
+    settings: FeedbackSettings,
+    onUpdateSettings: (FeedbackSettings) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF131C31)),
+        border = BorderStroke(1.dp, Color(0xFF1E293B))
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "RETROALIMENTACIÓN SENSORIAL",
+                    color = Color(0xFF94A3B8),
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+                val activeCount = listOf(
+                    settings.hapticEnabled,
+                    settings.audioEnabled,
+                    settings.buzzerEnabled,
+                    settings.voiceEnabled
+                ).count { it }
+                Text(
+                    text = "$activeCount/4 ACTIVOS",
+                    color = Color(0xFF38BDF8),
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                CompactFeedbackToggle(
+                    modifier = Modifier.weight(1f),
+                    drawableRes = R.drawable.ic_vibrate,
+                    label = "Háptica",
+                    enabled = settings.hapticEnabled,
+                    onToggle = { onUpdateSettings(settings.copy(hapticEnabled = !settings.hapticEnabled)) }
+                )
+                CompactFeedbackToggle(
+                    modifier = Modifier.weight(1f),
+                    drawableRes = R.drawable.ic_audio,
+                    label = "Audio",
+                    enabled = settings.audioEnabled,
+                    onToggle = { onUpdateSettings(settings.copy(audioEnabled = !settings.audioEnabled)) }
+                )
+                CompactFeedbackToggle(
+                    modifier = Modifier.weight(1f),
+                    drawableRes = R.drawable.ic_buzzer,
+                    label = "Buzzer",
+                    enabled = settings.buzzerEnabled,
+                    onToggle = { onUpdateSettings(settings.copy(buzzerEnabled = !settings.buzzerEnabled)) }
+                )
+                CompactFeedbackToggle(
+                    modifier = Modifier.weight(1f),
+                    drawableRes = R.drawable.ic_voice,
+                    label = "Voz",
+                    enabled = settings.voiceEnabled,
+                    onToggle = { onUpdateSettings(settings.copy(voiceEnabled = !settings.voiceEnabled)) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun CompactFeedbackToggle(
+    modifier: Modifier = Modifier,
+    drawableRes: Int,
+    label: String,
+    enabled: Boolean,
+    onToggle: () -> Unit
+) {
+    val activeColor = Color(0xFF10B981)
+    val inactiveBorder = Color(0xFF1E293B)
+    val bgColor = if (enabled) activeColor.copy(alpha = 0.12f) else Color(0xFF0F172A)
+    val borderColor = if (enabled) activeColor.copy(alpha = 0.6f) else inactiveBorder
+    val iconColor = if (enabled) activeColor else Color(0xFF64748B)
+    val textColor = if (enabled) Color.White else Color(0xFF64748B)
+
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(bgColor)
+            .border(1.dp, borderColor, RoundedCornerShape(8.dp))
+            .clickable { onToggle() }
+            .padding(vertical = 6.dp, horizontal = 2.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    painter = painterResource(drawableRes),
+                    contentDescription = label,
+                    tint = iconColor,
+                    modifier = Modifier.size(15.dp)
+                )
+                if (enabled) {
+                    Spacer(modifier = Modifier.width(3.dp))
+                    Box(
+                        modifier = Modifier
+                            .size(4.dp)
+                            .background(activeColor, CircleShape)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = label,
+                color = textColor,
+                fontSize = 10.sp,
+                fontWeight = if (enabled) FontWeight.Bold else FontWeight.Medium,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1
+            )
+            Spacer(modifier = Modifier.height(1.dp))
+            Text(
+                text = if (enabled) "ON" else "OFF",
+                color = if (enabled) activeColor else Color(0xFF475569),
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+    }
+}
+
+@Composable
 fun ControlButtonsSection(
     status: ConnectionStatus,
-    onAutoDiscover: () -> Unit,
-    onStartDemo: () -> Unit,
-    onDirectIp: () -> Unit,
-    onStop: () -> Unit
+    onToggleAutoSearch: () -> Unit,
+    onRefreshSearch: () -> Unit,
+    onDisconnect: () -> Unit
 ) {
+    val isAutoActive = status == ConnectionStatus.SEARCHING ||
+            status == ConnectionStatus.CONNECTING ||
+            status == ConnectionStatus.STREAMING
+
     Column(
         modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            // 1. Botón de Búsqueda Automática (Activo por defecto)
+            val autoBgColor = if (isAutoActive) Color(0xFF0284C7) else Color(0xFF1E293B)
+            val autoBorderColor = if (isAutoActive) Color(0xFF38BDF8) else Color(0xFF334155)
             Button(
-                onClick = onAutoDiscover,
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
-                shape = RoundedCornerShape(10.dp)
+                onClick = onToggleAutoSearch,
+                modifier = Modifier
+                    .weight(1.15f)
+                    .height(42.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = autoBgColor),
+                shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(1.dp, autoBorderColor)
             ) {
-                Text("📡 Auto Faro", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Icon(
+                    painter = painterResource(R.drawable.ic_radar),
+                    contentDescription = null,
+                    tint = if (isAutoActive) Color.White else Color(0xFF94A3B8),
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (isAutoActive) "Búsqueda: ON" else "Búsqueda: OFF",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1
+                )
             }
 
-            Button(
-                onClick = onStartDemo,
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5)),
-                shape = RoundedCornerShape(10.dp)
+            // 2. Botón Reintentar Autoconexión (Refresh)
+            OutlinedButton(
+                onClick = onRefreshSearch,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(42.dp),
+                shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(1.dp, Color(0xFF334155)),
+                colors = ButtonDefaults.outlinedButtonColors(containerColor = Color(0xFF131C31))
             ) {
-                Text("🎮 Probar IA", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Icon(
+                    painter = painterResource(R.drawable.ic_refresh),
+                    contentDescription = null,
+                    tint = Color(0xFF38BDF8),
+                    modifier = Modifier.size(15.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Reintentar",
+                    fontSize = 11.sp,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1
+                )
             }
         }
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            OutlinedButton(
-                onClick = onDirectIp,
-                modifier = Modifier.weight(1f),
-                shape = RoundedCornerShape(10.dp)
+        // 3. Botón Desconectar (visible cuando está conectado/streaming o conectando)
+        if (status == ConnectionStatus.STREAMING || status == ConnectionStatus.CONNECTING) {
+            Button(
+                onClick = onDisconnect,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(38.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                shape = RoundedCornerShape(10.dp),
+                border = BorderStroke(1.dp, Color(0xFF475569))
             ) {
-                Text("🔌 IP Directa", fontSize = 13.sp)
-            }
-
-            if (status != ConnectionStatus.IDLE) {
-                Button(
-                    onClick = onStop,
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569)),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text("⏹ Detener", fontSize = 13.sp)
-                }
+                Icon(
+                    painter = painterResource(R.drawable.ic_disconnect),
+                    contentDescription = null,
+                    tint = Color(0xFFF87171),
+                    modifier = Modifier.size(14.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Desconectar",
+                    fontSize = 11.sp,
+                    color = Color(0xFFF87171),
+                    fontWeight = FontWeight.SemiBold,
+                    fontFamily = FontFamily.Monospace
+                )
             }
         }
     }

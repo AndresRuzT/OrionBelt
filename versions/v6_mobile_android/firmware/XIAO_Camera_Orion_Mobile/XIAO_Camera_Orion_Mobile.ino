@@ -68,7 +68,7 @@ bool attemptConnection(int index, unsigned long timeoutMs) {
     WiFi.config(staticIP, gateway, subnet);
 #endif
 
-    WiFi.disconnect();
+    WiFi.disconnect(true);
     delay(100);
     WiFi.begin(targetSsid, targetPass);
 
@@ -95,23 +95,30 @@ bool attemptConnection(int index, unsigned long timeoutMs) {
     }
 
     Serial.println("\n⏳ [WIFI] No disponible o tiempo agotado.");
+    WiFi.disconnect(true);
+    delay(100);
     return false;
 }
 
 void connectWifiPriority() {
     WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(true);
+    WiFi.setAutoReconnect(false);
 
     // 1. FAST-PROBE: Probar primero la Red 0 (Celular principal) por 2.5 segundos
     // Si el punto de acceso está activo, el enlace se logra en ~800 ms sin demoras de escaneo.
     if (NUM_KNOWN_NETWORKS > 0 && strlen(KNOWN_NETWORKS[0].ssid) > 0) {
         Serial.println("⚡ [WIFI] Fast-Probe: Verificando Red de Máxima Prioridad (Celular)...");
         if (attemptConnection(0, 2500)) {
+            WiFi.setAutoReconnect(true);
             return;
         }
     }
 
-    // 2. PRIORITY-SCAN: Si la Red 0 no respondió, escanear el espectro
+    // Limpiar estado del driver de radio antes de iniciar escaneo
+    WiFi.disconnect(true);
+    delay(200);
+
+    // 2. PRIORITY-SCAN: Si la Red 0 no respondió, escanear el espectro 2.4 GHz
     Serial.println("🔍 [WIFI] Escaneando redes 2.4 GHz disponibles en el entorno...");
     int n = WiFi.scanNetworks(false, false);
     Serial.printf("   Encontradas %d redes en el aire.\n", n);
@@ -120,6 +127,7 @@ void connectWifiPriority() {
         // Evaluar en orden de prioridad estricta: índice 0, 1, 2...
         for (size_t prio = 0; prio < NUM_KNOWN_NETWORKS; prio++) {
             if (strlen(KNOWN_NETWORKS[prio].ssid) == 0) continue;
+            if (strcmp(KNOWN_NETWORKS[prio].ssid, "CELULAR_RESPALDO") == 0 && strlen(KNOWN_NETWORKS[prio].password) == 0) continue;
 
             // Verificar si el SSID de prioridad 'prio' fue visto en el escaneo
             bool foundInAir = false;
@@ -134,6 +142,7 @@ void connectWifiPriority() {
                 Serial.printf("🎯 [WIFI] Red prioritaria detectada en el aire: '%s'\n", KNOWN_NETWORKS[prio].ssid);
                 if (attemptConnection(prio, 8000)) {
                     WiFi.scanDelete();
+                    WiFi.setAutoReconnect(true);
                     return;
                 }
             }
@@ -141,7 +150,20 @@ void connectWifiPriority() {
         WiFi.scanDelete();
     }
 
-    // 3. Si ninguna conocida fue detectada, fallback cíclico cada 3 segundos
+    // 3. FALLBACK DIRECTO: Si el escaneo devolvió error (ej. n = -2) o la red está en canal especial,
+    // intentar conexión directa a las demás redes conocidas (ej. Audacia)
+    Serial.println("🔄 [WIFI] Escaneo no concluyente. Probando conexión directa a redes de respaldo...");
+    for (size_t prio = 1; prio < NUM_KNOWN_NETWORKS; prio++) {
+        if (strlen(KNOWN_NETWORKS[prio].ssid) == 0) continue;
+        if (strcmp(KNOWN_NETWORKS[prio].ssid, "CELULAR_RESPALDO") == 0 && strlen(KNOWN_NETWORKS[prio].password) == 0) continue;
+
+        if (attemptConnection(prio, 7000)) {
+            WiFi.setAutoReconnect(true);
+            return;
+        }
+    }
+
+    // 4. Si ninguna conocida fue lograda, reintentar en el loop
     Serial.println("⚠️ [WIFI] Ninguna red conocida disponible. Reintentando en 3 segundos...");
 }
 

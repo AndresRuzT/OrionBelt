@@ -12,6 +12,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.InetSocketAddress
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.coroutineContext
 
@@ -82,9 +83,11 @@ class XiaoDiscovery(
 
         var socket: DatagramSocket? = null
         try {
-            socket = DatagramSocket(port).apply {
+            socket = DatagramSocket(null).apply {
+                reuseAddress = true
                 broadcast = true
                 soTimeout = 1500
+                bind(InetSocketAddress(port))
             }
             val buffer = ByteArray(256)
             val packet = DatagramPacket(buffer, buffer.size)
@@ -98,12 +101,15 @@ class XiaoDiscovery(
                         emit(endpoint)
                     }
                 } catch (e: java.net.SocketTimeoutException) {
-                    // Normal timeout para permitir comprobar isActive
+                    // Timeout esperado para comprobar coroutineContext.isActive
+                } catch (e: java.io.IOException) {
+                    // Ignorar errores transitorios de red (ej. PortUnreachable) y continuar escuchando
+                    kotlinx.coroutines.delay(200)
                 }
             }
         } finally {
-            socket?.close()
-            multicastLock?.release()
+            try { socket?.close() } catch (ignored: Exception) {}
+            try { multicastLock?.release() } catch (ignored: Exception) {}
         }
     }.flowOn(Dispatchers.IO)
 

@@ -1,6 +1,8 @@
 package com.audacia.orion.vision
 
 import android.graphics.Bitmap
+import com.audacia.orion.feedback.Alert
+import com.audacia.orion.feedback.FeedbackSettings
 import com.audacia.orion.net.XiaoEndpoint
 
 enum class ConnectionStatus {
@@ -23,6 +25,8 @@ data class VisionState(
     val fps: Float = 0.0f,
     val activeBackend: InferenceBackend = InferenceBackend.CPU,
     val framesProcessed: Long = 0,
+    val activeAlert: Alert? = null,
+    val feedbackSettings: FeedbackSettings = FeedbackSettings(),
     val statusMessage: String = "Listo para iniciar",
     val benchmarkSummary: String? = null
 )
