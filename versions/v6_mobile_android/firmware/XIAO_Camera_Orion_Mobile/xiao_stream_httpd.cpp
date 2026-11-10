@@ -33,17 +33,37 @@ bool isClientStreaming() {
     return s_client_streaming;
 }
 
-// Envía un bloque completo por el socket HTTP en una sola transacción lógica (sin fragmentación chunked)
-static esp_err_t send_all(httpd_req_t *req, const char *buf, size_t len) {
+// Envía un bloque completo por el socket HTTP, pero si el buffer TCP de LwIP está lleno
+// al inicio del frame (sent == 0 tras el timeout corto de SO_SNDTIMEO = 60 ms),
+// descarta limpiamente el frame sin corromper el stream ni acumular retraso.
+static esp_err_t send_frame_or_drop(httpd_req_t *req, const char *buf, size_t len, int *consecutive_drops) {
     size_t sent = 0;
-    int retries = 0;
+    int partial_retries = 0;
+
     while (sent < len) {
         int ret = httpd_send(req, buf + sent, len - sent);
         if (ret > 0) {
             sent += (size_t)ret;
-            retries = 0;
+            partial_retries = 0;
+            if (consecutive_drops) *consecutive_drops = 0;
         } else if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
-            if (++retries > 3) return ESP_FAIL;
+            if (sent == 0) {
+                // No se ha enviado ni un solo byte de este frame y la cola TCP sigue ocupada (>60 ms):
+                // descartar el fotograma completo para no atascar el ESP32 ni acumular latencia.
+                if (consecutive_drops) {
+                    (*consecutive_drops)++;
+                    if (*consecutive_drops > 40) {
+                        // Más de ~2.5s sin poder enviar ni un byte: cliente desconectado
+                        return ESP_FAIL;
+                    }
+                }
+                return ESP_OK;
+            }
+            // Si ya se envió parte del frame (sent > 0), completar los bytes restantes
+            // para mantener intacta la frontera multipart/JPEG en el stream TCP.
+            if (++partial_retries > 20) {
+                return ESP_FAIL;
+            }
             vTaskDelay(pdMS_TO_TICKS(5));
         } else {
             return ESP_FAIL;
@@ -56,6 +76,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     camera_fb_t *fb = NULL;
     esp_err_t res = ESP_OK;
     char part_buf[128];
+    int consecutive_drops = 0;
 
     // Reservar buffer de transmisión contiguo en PSRAM (una sola vez)
     if (s_tx_buf == NULL) {
@@ -67,11 +88,17 @@ static esp_err_t stream_handler(httpd_req_t *req) {
         }
     }
 
-    // Optimización de socket TCP para envío directo de bloques completos
+    // Optimización de socket TCP: desactivar Nagle (TCP_NODELAY) en el emisor y fijar
+    // un timeout de envío corto (SO_SNDTIMEO = 60 ms en lugar de los 5000 ms por defecto de ESP-IDF)
     int sockfd = httpd_req_to_sockfd(req);
     if (sockfd >= 0) {
         int nodelay = 1;
         setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char *)&nodelay, sizeof(nodelay));
+
+        struct timeval snd_tv;
+        snd_tv.tv_sec = 0;
+        snd_tv.tv_usec = 60000; // 60 ms máx de espera antes de descartar frame si LwIP está lleno
+        setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
     }
 
     // Enviar cabecera HTTP 200 OK directa (sin Transfer-Encoding: chunked) para evitar
@@ -84,7 +111,7 @@ static esp_err_t stream_handler(httpd_req_t *req) {
         "Connection: close\r\n"
         "X-Framerate: 22\r\n\r\n";
 
-    res = send_all(req, STREAM_HTTP_HEADER, strlen(STREAM_HTTP_HEADER));
+    res = send_frame_or_drop(req, STREAM_HTTP_HEADER, strlen(STREAM_HTTP_HEADER), &consecutive_drops);
     if (res != ESP_OK) return res;
 
     s_client_streaming = true;
@@ -113,13 +140,9 @@ static esp_err_t stream_handler(httpd_req_t *req) {
                 esp_camera_fb_return(fb);
                 fb = NULL;
 
-                // 3. Envío directo en UN SOLO bloque contiguo sin envoltura chunked
-                res = send_all(req, (const char *)s_tx_buf, hlen + jpg_len);
+                // 3. Envío directo en UN SOLO bloque contiguo con descarte si la cola TCP no acepta a tiempo
+                res = send_frame_or_drop(req, (const char *)s_tx_buf, hlen + jpg_len, &consecutive_drops);
             } else {
-                res = send_all(req, part_buf, hlen);
-                if (res == ESP_OK) {
-                    res = send_all(req, (const char *)fb->buf, jpg_len);
-                }
                 esp_camera_fb_return(fb);
                 fb = NULL;
             }

@@ -88,9 +88,10 @@ bool attemptConnection(int index, unsigned long timeoutMs) {
         Serial.printf("   📶 Intensidad:   %d dBm\n", WiFi.RSSI());
 
         // Desactivar ahorro de energía (Modem-Sleep) en ambas capas (Arduino + ESP-IDF)
-        // para evitar pausas DTIM de 100-300 ms en el stream MJPEG
+        // y fijar ancho de banda en 20 MHz (HT20) para máxima robustez frente a interferencias 2.4 GHz
         WiFi.setSleep(false);
         esp_wifi_set_ps(WIFI_PS_NONE);
+        esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
         // Potencia equilibrada (17 dBm): previene recalentamiento del sensor OV2640
         WiFi.setTxPower(WIFI_POWER_17dBm);
         return true;
@@ -106,6 +107,7 @@ void connectWifiPriority() {
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     esp_wifi_set_ps(WIFI_PS_NONE);
+    esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
     WiFi.setAutoReconnect(false);
 
     // 1. FAST-PROBE: Probar primero la Red 0 (Celular principal) por 2.5 segundos
@@ -196,10 +198,11 @@ void setup() {
     }
 
     // ------------------------------------------------------------------------
-    // 2. CONEXIÓN WI-FI CON PRIORIDAD Y BLOQUEO PERMANENTE DE MODEM-SLEEP
+    // 2. CONEXIÓN WI-FI CON PRIORIDAD Y BLOQUEO PERMANENTE DE MODEM-SLEEP / HT20
     // ------------------------------------------------------------------------
     WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
         esp_wifi_set_ps(WIFI_PS_NONE);
+        esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
     });
     connectWifiPriority();
 
