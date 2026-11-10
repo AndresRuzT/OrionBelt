@@ -1,21 +1,20 @@
 # 📜 Historial y Evolución de Versiones de ORION
 
-El proyecto **ORION** ha evolucionado a través de 5 versiones principales, transitando desde un prototipo monolítico de escritorio hasta una plataforma web distribuida con conmutación en caliente de hardware IoT.
+El proyecto **ORION** ha evolucionado a través de 6 versiones principales, transitando desde un prototipo monolítico de escritorio hasta una plataforma distribuida en tiempo real y una aplicación móvil nativa para **Android** totalmente autónoma para uso de bolsillo.
 
 ---
 
 ## 📊 Matriz Comparativa de Versiones
 
-| Característica | v1: Desktop Inicial | v2: Desktop Optimizado | v3: Web Local | v4: Web ESP32 | v5: Web XIAO ESP32S3 (Actual) |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Entorno de Visualización** | Ventana OpenCV | Ventana OpenCV + HUD | Navegador Web | Navegador Web | Navegador Web Reactivo |
-| **Fuente de Video** | Cámara Local / IP | Cámara Local / IP | Cámara Local / USB | ESP32-CAM (AI-Thinker) | **XIAO ESP32S3 + Hot-Swap Mac** |
-| **Tasa de Cuadros (FPS)** | 10 - 15 FPS | 20 - 25 FPS | 20 - 25 FPS | 8 - 15 FPS | **30 FPS (Constantes)** |
-| **Conmutación en Caliente** | ❌ No | ❌ No | ❌ No | ❌ No | **✅ Sí (Bidireccional < 1s)** |
-| **Descubrimiento de IP** | ❌ Manual | ❌ Manual | N/A | ⚠️ Búsqueda lenta | **✅ Instantáneo + Multicast** |
-| **Arranque en Segundo Plano**| ❌ No | ❌ No | ❌ No | ❌ No | **✅ Sí (.orion_port + .sh daemon)**|
-| **Soporte Apple Silicon (MPS)**| ⚠️ Parcial | ⚠️ Parcial | ✅ Sí | ✅ Sí | **✅ Optimizado + Fallback** |
-| **Prevención Crash macOS** | ❌ No | ❌ No | ❌ No | ❌ No | **✅ Thread-safe join AVFoundation**|
+| Característica | v1: Desktop Inicial | v2: Desktop Optimizado | v3: Web Local | v4: Web ESP32 | v5: Web XIAO ESP32S3 | v6: Mobile Android (Actual) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Entorno de Ejecución** | Ventana OpenCV | Ventana OpenCV + HUD | Navegador Web (PC) | Navegador Web (PC) | Navegador Web Reactivo (PC) | **App Nativa Android (Kotlin + Compose)** |
+| **Fuente de Video** | Cámara Local / IP | Cámara Local / IP | Cámara Local / USB | ESP32-CAM (AI-Thinker) | XIAO ESP32S3 + Hot-Swap Mac | **XIAO ESP32S3 en Hotspot Móvil** |
+| **Inferencia IA** | PyTorch CPU/GPU | PyTorch CPU/GPU | PyTorch CPU/GPU | PyTorch CPU/GPU | PyTorch MPS / CUDA / CPU | **TFLite On-Device (GPU OpenGL + CPU XNNPACK)** |
+| **Tasa de Cuadros (FPS)** | 10 - 15 FPS | 20 - 25 FPS | 20 - 25 FPS | 8 - 15 FPS | 30 FPS (en Mac/PC) | **11 - 15 FPS sostenidos en móvil (0% drop)** |
+| **Descubrimiento de IP** | ❌ Manual | ❌ Manual | N/A | ⚠️ Búsqueda lenta | ✅ Multicast / Subred | **✅ UDP Beacon `:4210` + ARP + Subred** |
+| **Alertas al Usuario** | Visual | Audio simple | Audio + HUD Web | Audio + Buzzer ESP32 | Audio asíncrono + HUD Web | **✅ Háptica + Audio Estéreo Binaural + Voz TTS** |
+| **Operación en Bolsillo** | ❌ Requiere PC | ❌ Requiere PC | ❌ Requiere PC | ❌ Requiere PC | ❌ Requiere Mac/PC servidor | **✅ ForegroundService (Pantalla Apagada)** |
 
 ---
 
@@ -81,11 +80,11 @@ El proyecto **ORION** ha evolucionado a través de 5 versiones principales, tran
 
 ---
 
-### 🔹 Versión 5: Web XIAO ESP32S3 Sense (Versión Insignia Actual) (`versions/v5_web_xiao_esp32s3/`)
+### 🔹 Versión 5: Web XIAO ESP32S3 Sense (Servidor Mac/PC) (`versions/v5_web_xiao_esp32s3/`)
 * **Archivo principal:** [`versions/v5_web_xiao_esp32s3/main.py`](../versions/v5_web_xiao_esp32s3/main.py)
 * **Lanzador rápido:** [`versions/v5_web_xiao_esp32s3/start.py`](../versions/v5_web_xiao_esp32s3/start.py)
 * **Firmware:** [`versions/v5_web_xiao_esp32s3/firmware/XIAO_Camera_Orion/`](../versions/v5_web_xiao_esp32s3/firmware/XIAO_Camera_Orion/)
-* **Objetivo:** Solución definitiva de grado de producción: hardware de última generación, máxima fluidez (30 FPS), tolerancia total a fallos de red y arranque autónomo como servicio en macOS.
+* **Objetivo:** Solución de escritorio/servidor de alta velocidad: hardware XIAO ESP32S3 Sense a 30 FPS, tolerancia a fallos de red y arranque autónomo como servicio en macOS.
 * **Características Destacadas:**
   - **Firmware dedicado para XIAO ESP32S3:** Servidor HTTP en Núcleo 1, puerto dedicado 81, triple buffer DMA en PSRAM y eliminación del bloqueo TCP `SO_SNDTIMEO`.
   - **Hot-Swap y Rollback Autónomo:** Si el XIAO se apaga, la cámara de la Mac entra en acción inmediatamente; cuando el XIAO vuelve a encenderse, conmuta de regreso sin tocar nada.
@@ -93,7 +92,26 @@ El proyecto **ORION** ha evolucionado a través de 5 versiones principales, tran
   - **Seguridad contra caídas en macOS:** Cierre ordenado de subprocesos `afplay` y de buffers de captura para prevenir `SIGSEGV: 11`.
 * **Cómo ejecutar:**
   ```bash
-  python main.py
+  python main.py --version 5
   # o con opciones:
-  python main.py --xiao-ip 172.16.121.4 --device mps
+  python main.py --version 5 --xiao-ip 172.16.121.4 --device mps
+  ```
+
+---
+
+### 🔹 Versión 6: Mobile Android + XIAO ESP32S3 Sense (Versión Móvil Autónoma) (`versions/v6_mobile_android/`)
+* **Guía y documentación:** [`versions/v6_mobile_android/README.md`](../versions/v6_mobile_android/README.md)
+* **Proyecto Android:** [`versions/v6_mobile_android/android/`](../versions/v6_mobile_android/android/)
+* **Firmware Móvil:** [`versions/v6_mobile_android/firmware/XIAO_Camera_Orion_Mobile/`](../versions/v6_mobile_android/firmware/XIAO_Camera_Orion_Mobile/)
+* **Herramientas Python:** [`versions/v6_mobile_android/tools/`](../versions/v6_mobile_android/tools/)
+* **Objetivo:** Independencia total de computadoras portátiles. El cinturón ORION con XIAO ESP32S3 Sense se conecta a la Zona Wi-Fi (Hotspot) del teléfono Android, ejecutando toda la visión profunda y el sistema de alertas directamente en el bolsillo del usuario.
+* **Características Destacadas:**
+  - **Inferencia TFLite On-Device con Afinidad de Hilo GPU:** Ejecuta `midas_v2_1_small_256.tflite` sobre un hilo único dedicado (`OrionInferenceThread`) con `GpuDelegate` (FP16 + `SUSTAINED_SPEED`) y conmutación en caliente a CPU (`XNNPACK`, 4 hilos).
+  - **Streaming MJPEG Zero-Allocation y Radio HT20:** El XIAO transmite frames desde PSRAM sin fragmentación HTTP chunked, con ancho de banda Wi-Fi fijado en `WIFI_BW_HT20` y descarte activo a `60 ms` (`SO_SNDTIMEO`) para erradicar bloqueos de cola TCP; la app decodifica mediante un **Triple Buffer** (`inBitmap`) libre de pausas de Garbage Collector y sin colisiones con el VSYNC de la UI.
+  - **Navegación Espacial por 3 Zonas y Alertas Multimodales:** Divide el mapa de profundidad en `LEFT`, `CENTER` y `RIGHT` (banda central vertical del 20% al 80%), emitiendo patrones hápticos diferenciados, tonos estéreo binaurales (`AudioTrack` PCM sintetizado) y comandos de voz en español (`TextToSpeech`).
+  - **Modo Bolsillo y Resiliencia Térmica:** Servicio en primer plano (`OrionForegroundService`) con `WakeLock` parcial y `WifiLock` de baja latencia, `StreamWatchdog` de reconexión automática y `ThermalController` que ajusta la cadencia si el teléfono se calienta.
+  - **Ajustes Persistentes:** Control deslizable de umbral de cercanía (`40%` a `90%`, por defecto `60%`), conexión manual por IP opcional y persistencia automática en `SharedPreferences`.
+* **Cómo consultar instrucciones de compilación/instalación:**
+  ```bash
+  python main.py --version 6
   ```

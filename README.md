@@ -31,10 +31,11 @@ ORION/
 │   ├── v2_desktop_optimized/     # Versión 2: Desktop multihilo con HUD y telemetría
 │   ├── v3_web_local/             # Versión 3: Servidor Web FastAPI con cámara local
 │   ├── v4_web_esp32/             # Versión 4: Servidor Web con ESP32-CAM AI-Thinker
-│   └── v5_web_xiao_esp32s3/      # Versión 5: Web XIAO ESP32S3 + Hot-Swap + Daemon [ACTUAL]
+│   ├── v5_web_xiao_esp32s3/      # Versión 5: Web XIAO ESP32S3 + Hot-Swap + Daemon [PC/MAC]
+│   └── v6_mobile_android/        # Versión 6: App Nativa Android + XIAO en Hotspot [MÓVIL]
 ├── docs/                         # Centro de documentación oficial
 │   ├── ARCHITECTURE.md           # Arquitectura profunda, IA, streaming y audio
-│   ├── VERSIONS.md               # Comparativa y evolución detallada de v1 a v5
+│   ├── VERSIONS.md               # Comparativa y evolución detallada de v1 a v6
 │   ├── HARDWARE_XIAO_ESP32S3.md  # Conexión, antena y flasheo de XIAO ESP32S3
 │   ├── HARDWARE_ESP32_CAM.md     # Programación FTDI para ESP32-CAM AI-Thinker
 │   ├── MACOS_SERVICE.md          # Configuración de arranque automático en macOS (.sh)
@@ -93,23 +94,26 @@ python main.py --version 1      # v1: Desktop Inicial (OpenCV)
 python main.py --version 2      # v2: Desktop Optimizado (HUD Telemetría)
 python main.py --version 3      # v3: Web Dashboard (Cámara Local)
 python main.py --version 4      # v4: Web ESP32-CAM (AI-Thinker)
-python main.py --version 5      # v5: Web XIAO ESP32S3 Sense (Por defecto)
+python main.py --version 5      # v5: Web XIAO ESP32S3 Sense (Por defecto en PC/Mac)
+python main.py --version 6      # v6: Mobile Android + XIAO ESP32S3 (Guía de compilación móvil)
 ```
 
 Para más detalles sobre los cambios y diferencias entre versiones, consulta **[docs/VERSIONS.md](docs/VERSIONS.md)**.
 
 ---
 
-## 🌟 Características de la Versión Actual (v5)
+## 🌟 Características Destacadas (v5 Web y v6 Mobile Android)
 
-1. **30 FPS MJPEG Inalámbrico Continuo:**
+1. **ORION v6 Mobile Android (Autónomo en Bolsillo):**
+   - App nativa en Kotlin + Jetpack Compose con inferencia **MiDaS v2.1 Small** acelerada en GPU móvil (`OpenGL FP16`) y CPU (`XNNPACK`), streaming MJPEG zero-allocation sobre el Hotspot del celular (`WIFI_BW_HT20` + descarte activo a `60 ms`), alertas hápticas + audio estéreo binaural + voz TTS y servicio resiliente con pantalla apagada.
+2. **30 FPS MJPEG Inalámbrico Continuo (v5 Servidor):**
    - Firmware con reloj de sensor a 16 MHz y eliminación de timeouts TCP para eliminar congelamientos de fotograma.
-2. **Conmutación en Caliente (Hot-Swap) y Rollback:**
+3. **Conmutación en Caliente (Hot-Swap) y Rollback (v5):**
    - Si la cámara XIAO se desconecta o se apaga, la cámara web integrada de la computadora toma el control en menos de 1 segundo sin reiniciar el servidor.
    - Cuando el XIAO se reconecta, el sistema regresa al stream inalámbrico de forma transparente.
-3. **Arranque en Segundo Plano como Servicio en macOS:**
+4. **Arranque en Segundo Plano como Servicio en macOS (v5):**
    - Generación del archivo `.orion_port` en la raíz para sincronización con scripts automáticos `.sh` de inicio de sesión.
-4. **Telemetría WebSocket a 25 Hz:**
+5. **Telemetría WebSocket a 25 Hz (v5):**
    - Manómetro de proximidad, zonas de advertencia (izquierda, centro, derecha) y gráficas en vivo en [HTML5](templates/index.html).
 
 ---
@@ -118,6 +122,7 @@ Para más detalles sobre los cambios y diferencias entre versiones, consulta **[
 
 Para guías paso a paso de hardware y configuración del sistema operativo:
 
+* 📱 **[Guía Completa ORION v6: Mobile Android + XIAO ESP32S3](versions/v6_mobile_android/README.md)**
 * 🏗️ **[Arquitectura y Funcionamiento Interno](docs/ARCHITECTURE.md)**
 * 🛠️ **[Guía de Hardware: XIAO ESP32S3 Sense](docs/HARDWARE_XIAO_ESP32S3.md)**
 * 🛠️ **[Guía de Hardware: ESP32-CAM](docs/HARDWARE_ESP32_CAM.md)**
@@ -130,7 +135,7 @@ Para guías paso a paso de hardware y configuración del sistema operativo:
 
 | Parámetro | Opciones / Tipo | Por Defecto | Descripción |
 | :--- | :--- | :--- | :--- |
-| `--version`, `-V` | `1`, `2`, `3`, `4`, `5` | `5` | Versión de ORION a ejecutar. |
+| `--version`, `-V` | `1`, `2`, `3`, `4`, `5`, `6` | `5` | Versión de ORION a ejecutar. |
 | `--list`, `-l` | Flag | - | Muestra todas las versiones disponibles y sale. |
 | `--xiao-ip` | IP (`str`) | Auto-discovery | IP del XIAO ESP32S3 Sense. |
 | `--device` | `auto`, `cpu`, `cuda`, `mps` | `auto` | Dispositivo de cómputo para la red neuronal. |

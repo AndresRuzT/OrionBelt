@@ -113,3 +113,57 @@ Para alertar al usuario de obstáculos críticos sin degradar los FPS de inferen
 * **macOS:** Se utiliza el comando nativo `afplay` en un subproceso desacoplado. Para prevenir la acumulación de procesos zombis, se ejecuta un monitor ligero que limpia los procesos terminados mediante llamadas no bloqueantes `poll()`.
 * **Windows:** Se emplea síntesis de onda senoidal en memoria mediante el módulo estándar `wave` y `winsound.PlaySound(..., SND_ASYNC | SND_MEMORY)`.
 * **Cooldown de Alarma:** Intervalo mínimo configurable (por defecto 0.8 s) para evitar saturación acústica continua.
+
+---
+
+## 5. Arquitectura Móvil Autónoma (ORION v6: Android + XIAO ESP32S3)
+
+En **ORION v6** (`versions/v6_mobile_android/`), toda la computación se traslada al teléfono Android del usuario, operando sobre la **Zona Wi-Fi (Hotspot)** local del dispositivo sin depender de servidores externos ni conexión a Internet.
+
+```mermaid
+flowchart TD
+    subgraph Cinturon["Cinturón ORION (XIAO ESP32S3 Sense)"]
+        OV2640["Sensor OV2640 + Triple Buffer DMA PSRAM"]
+        Core1["Core 1: Servidor MJPEG (:81/stream) - HT20 + SO_SNDTIMEO 60ms"]
+        Core0["Core 0: Control HTTP (:80/status, /led, /framesize) + Beacon UDP :4210"]
+        OV2640 --> Core1
+    end
+
+    subgraph AndroidApp["Teléfono Android (OrionForegroundService)"]
+        Discovery["XiaoDiscovery (UDP :4210 + Tabla ARP + Barrido Subred)"]
+        MjpegReader["MjpegStreamReader (Triple Buffer inBitmap Zero-Allocation)"]
+        Channel["Channel(CONFLATED) - Descarte de Frames Antiguos"]
+        GpuThread["OrionInferenceThread (Hilo Dedicado OpenGL / CPU XNNPACK)"]
+        DepthEst["DepthEstimator (MiDaS v2.1 Small 256x256 + Filtro Temporal IIR)"]
+        Zones["ZoneAnalyzer (LEFT / CENTER / RIGHT - Percentil 90)"]
+        Policy["AlertPolicy (Umbral Configurable 40%-90% + Histéresis + Cooldown)"]
+        Feedback["FeedbackController (Háptica + AudioTrack Binaural + Voz TTS)"]
+        Resilience["StreamWatchdog + ThermalController"]
+
+        Core0 -.->|Descubrimiento 1-3s| Discovery
+        Core1 -->|TCP_NODELAY Direct Send| MjpegReader
+        Discovery --> MjpegReader
+        MjpegReader --> Channel
+        Channel --> GpuThread
+        GpuThread --> DepthEst
+        DepthEst --> Zones
+        Zones --> Policy
+        Policy --> Feedback
+        Resilience --> MjpegReader
+        Resilience --> GpuThread
+    end
+```
+
+### Pilares Técnicos de ORION v6
+
+1. **Transmisión MJPEG sin Bloqueos (`WIFI_BW_HT20` + Envío Directo + `SO_SNDTIMEO = 60 ms`):**
+   - El firmware del XIAO fija el ancho de banda de radio en **HT20 (20 MHz)** para maximizar la relación señal/ruido en entornos de 2.4 GHz y copia el JPEG del buffer DMA de la cámara a un buffer contiguo en PSRAM (`s_tx_buf`), liberando el DMA de inmediato.
+   - Se eliminó la codificación HTTP `Transfer-Encoding: chunked` en favor de un único `httpd_send()` por fotograma con `TCP_NODELAY = 1` y un timeout estricto de socket `SO_SNDTIMEO = 60 ms`. Si el aire presenta interferencia momentánea, el fotograma se descarta limpiamente sin saturar la cola `TCP_SND_QUEUELEN` de LwIP.
+2. **Pipeline Android Zero-Allocation con Triple Buffer y Afinidad de Hilo GPU:**
+   - `MjpegStreamReader` reutiliza un buffer de bytes preasignado y decodifica en un anillo de **3 `Bitmap` mutables (`inBitmap`)**, evitando colisiones con el VSYNC de Jetpack Compose y eliminando pausas del Garbage Collector (`GC freed`).
+   - `DepthEstimator` ejecuta el intérprete TFLite y su `GpuDelegate` exclusivamente sobre un único hilo dedicado (`OrionInferenceThread`) con `INFERENCE_PREFERENCE_SUSTAINED_SPEED` y precisión FP16, garantizando que el contexto OpenGL ES nunca cambie de hilo nativo.
+3. **Segmentación Espacial en 3 Zonas y Retroalimentación Multimodal:**
+   - `ZoneAnalyzer` recorta la franja vertical útil (20% a 80% de la altura para ignorar techo y piso inmediato), divide el ancho en tres tercios (`LEFT`, `CENTER`, `RIGHT`) y calcula el percentil 90 de cercanía normalizada.
+   - `AlertPolicy` evalúa las zonas frente al umbral ajustable por el usuario (`nearThreshold` de `0.40` a `0.90`, persistido en `OrionPreferences`) y dispara alertas diferenciadas mediante vibración (`HapticFeedback`), tonos estéreo panoramizados (`AudioFeedback` sobre `AudioTrack` PCM) y síntesis de voz en español (`VoiceFeedback`).
+4. **Modo Bolsillo y Control Térmico (`OrionForegroundService`):**
+   - Mantiene activo un `PARTIAL_WAKE_LOCK` y un `WIFI_MODE_FULL_LOW_LATENCY` para procesar sin interrupciones con la pantalla bloqueada en el bolsillo, mientras `ThermalController` monitoriza la temperatura del teléfono para modular la cadencia si se detecta sobrecalentamiento.

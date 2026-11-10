@@ -68,9 +68,15 @@ VERSIONS = {
     },
     "5": {
         "id": "v5_web_xiao_esp32s3",
-        "name": "v5: Web XIAO ESP32S3 Sense (Hot-Swap + macOS Service) [ACTUAL]",
+        "name": "v5: Web XIAO ESP32S3 Sense (Hot-Swap + macOS Service) [PC/MAC]",
         "path": PROJECT_ROOT / "versions" / "v5_web_xiao_esp32s3" / "main.py",
-        "desc": "Versión insignia: 30 FPS MJPEG, auto-discovery de IP, hot-swap a cámara Mac y servicio en segundo plano.",
+        "desc": "Versión de escritorio/servidor: 30 FPS MJPEG, auto-discovery de IP, hot-swap a cámara Mac y servicio en segundo plano.",
+    },
+    "6": {
+        "id": "v6_mobile_android",
+        "name": "v6: Mobile Android + XIAO ESP32S3 Sense (App Nativa Android) [MÓVIL]",
+        "path": PROJECT_ROOT / "versions" / "v6_mobile_android" / "README.md",
+        "desc": "App Android autónoma (Kotlin/TFLite GPU) con Hotspot móvil, alertas hápticas/binaurales/TTS y modo bolsillo.",
     },
 }
 
@@ -80,6 +86,33 @@ DEFAULT_VERSION = os.getenv("ORION_VERSION", "5")
 def print_banner():
     print("=" * 68)
     print("      🌌 ORION - Optical Recognition & Intelligent Obstacle Navigation")
+    print("=" * 68)
+
+
+def print_v6_mobile_guide():
+    print_banner()
+    print("📱 ORION v6: Mobile Android + XIAO ESP32S3 Sense")
+    print("=" * 68)
+    print(
+        "\nEsta versión se ejecuta de forma nativa en un teléfono Android junto con\n"
+        "el cinturón XIAO ESP32S3 Sense conectado a la Zona Wi-Fi (Hotspot) del móvil.\n"
+    )
+    print("1️⃣  DESCARGAR EL MODELO TFLITE (MiDaS v2.1 Small 256x256):")
+    print("    cd versions/v6_mobile_android/tools")
+    print("    python fetch_model.py\n")
+    print("2️⃣  FLASHEAR EL FIRMWARE EN EL XIAO ESP32S3 SENSE (Arduino IDE):")
+    print("    • Copia secrets.example.h -> secrets.h en:")
+    print("      versions/v6_mobile_android/firmware/XIAO_Camera_Orion_Mobile/")
+    print("    • Configura HOTSPOT_SSID y HOTSPOT_PASS con la Zona Wi-Fi de tu celular.")
+    print("    • Placa: 'XIAO_ESP32S3' | PSRAM: 'OPI PSRAM' (Obligatorio) | Subir sketch.\n")
+    print("3️⃣  COMPILAR E INSTALAR LA APP ANDROID:")
+    print("    cd versions/v6_mobile_android/android")
+    print("    .\\gradlew.bat assembleDebug")
+    print("    .\\gradlew.bat installDebug   # (Con el teléfono conectado por USB)\n")
+    print("    📦 APK generado en:")
+    print("    versions/v6_mobile_android/android/app/build/outputs/apk/debug/app-debug.apk\n")
+    print("📖 Guía completa paso a paso:")
+    print("    versions/v6_mobile_android/README.md")
     print("=" * 68)
 
 
@@ -135,6 +168,10 @@ def main():
         print(f"   Versiones válidas: {', '.join(VERSIONS.keys())}", file=sys.stderr)
         print("   Ejecuta 'python main.py --list' para ver todas las opciones.", file=sys.stderr)
         sys.exit(1)
+
+    if chosen_ver == "6":
+        print_v6_mobile_guide()
+        sys.exit(0)
 
     target_info = VERSIONS[chosen_ver]
     target_script = target_info["path"]

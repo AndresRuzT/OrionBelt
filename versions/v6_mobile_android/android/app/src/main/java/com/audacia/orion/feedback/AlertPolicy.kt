@@ -24,7 +24,7 @@ data class Alert(
  * 4. Detección direccional para obstáculos laterales.
  */
 class AlertPolicy(
-    val nearThreshold: Float = 0.60f,
+    @Volatile var nearThreshold: Float = 0.60f,
     val releaseMargin: Float = 0.05f
 ) {
     private var inAlert = false

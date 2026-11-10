@@ -73,7 +73,6 @@ class OrionService : Service() {
                     ConnectionStatus.SEARCHING -> "Buscando cámara XIAO..."
                     ConnectionStatus.CONNECTING -> "Conectando con cámara..."
                     ConnectionStatus.ERROR -> "Interrupción: ${state.statusMessage}"
-                    ConnectionStatus.DEMO_MODE -> "Modo Demo Activo"
                     ConnectionStatus.IDLE -> "En espera"
                 }
                 updateNotification(message)

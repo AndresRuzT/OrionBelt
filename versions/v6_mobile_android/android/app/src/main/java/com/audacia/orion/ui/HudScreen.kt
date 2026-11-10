@@ -36,6 +36,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -63,6 +65,7 @@ import com.audacia.orion.feedback.FeedbackSettings
 import com.audacia.orion.resilience.ThermalThrottleLevel
 import com.audacia.orion.resilience.WatchdogState
 import com.audacia.orion.vision.Action
+import com.audacia.orion.vision.BenchmarkMetrics
 import com.audacia.orion.vision.ConnectionStatus
 import com.audacia.orion.vision.InferenceBackend
 import com.audacia.orion.vision.VisionState
@@ -81,6 +84,27 @@ fun HudScreen(
     val state by viewModel.state.collectAsState()
     val scrollState = rememberScrollState()
     var showBatteryTip by remember { mutableStateOf(true) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
+
+    if (showSettingsDialog) {
+        DetectionSettingsDialog(
+            nearThreshold = state.nearThreshold,
+            initialIp = state.endpoint?.ip ?: viewModel.getLastKnownIp().orEmpty(),
+            isBenchmarkRunning = state.isBenchmarkRunning,
+            benchmarkProgress = state.benchmarkProgress,
+            benchmarkPhase = state.benchmarkPhase,
+            benchmarkMetrics = state.benchmarkMetrics,
+            onThresholdChange = { viewModel.updateNearThreshold(it) },
+            onConnectManualIp = { ip ->
+                showSettingsDialog = false
+                if (ip.isNotBlank()) {
+                    viewModel.connectDirect(ip)
+                }
+            },
+            onRunBenchmark = { viewModel.runBenchmark() },
+            onDismiss = { showSettingsDialog = false }
+        )
+    }
 
     Column(
         modifier = modifier
@@ -97,6 +121,7 @@ fun HudScreen(
                 val next = if (state.activeBackend == InferenceBackend.GPU) InferenceBackend.CPU else InferenceBackend.GPU
                 viewModel.switchBackend(next)
             },
+            onOpenDetectionSettings = { showSettingsDialog = true },
             onRequestBatteryOptimization = onRequestBatteryOptimization,
             isBatteryOptimizationIgnored = isBatteryOptimizationIgnored,
             onOpenAppSettings = onOpenAppSettings,
@@ -137,7 +162,11 @@ fun HudScreen(
         Spacer(modifier = Modifier.height(12.dp))
 
         // --- 5. BARRAS ESPACIALES POR ZONAS (IZQ, CENTRO, DER) ---
-        SpatialZonesCard(zoneResult = state.zoneResult)
+        SpatialZonesCard(
+            zoneResult = state.zoneResult,
+            nearThreshold = state.nearThreshold,
+            onOpenThresholdSettings = { showSettingsDialog = true }
+        )
 
         Spacer(modifier = Modifier.height(12.dp))
 
@@ -183,6 +212,7 @@ fun HudScreen(
 fun TopHudHeader(
     state: VisionState,
     onBackendToggle: () -> Unit,
+    onOpenDetectionSettings: () -> Unit = {},
     onRequestBatteryOptimization: () -> Unit = {},
     isBatteryOptimizationIgnored: Boolean = true,
     onOpenAppSettings: () -> Unit = {},
@@ -199,7 +229,7 @@ fun TopHudHeader(
                 ConnectionStatus.SEARCHING -> Color(0xFFF59E0B) // Ámbar
                 ConnectionStatus.CONNECTING -> Color(0xFF6366F1) // Índigo
                 ConnectionStatus.ERROR -> Color(0xFFEF4444) // Rojo
-                ConnectionStatus.IDLE, ConnectionStatus.DEMO_MODE -> Color(0xFF64748B) // Gris
+                ConnectionStatus.IDLE -> Color(0xFF64748B) // Gris
             }
 
             Box(
@@ -222,7 +252,6 @@ fun TopHudHeader(
                     ConnectionStatus.CONNECTING -> "CONECTANDO..."
                     ConnectionStatus.ERROR -> "ERROR DE ENLACE"
                     ConnectionStatus.IDLE -> "EN ESPERA"
-                    ConnectionStatus.DEMO_MODE -> "MODO DEMO"
                 }
                 Text(
                     text = statusLabel,
@@ -312,6 +341,27 @@ fun TopHudHeader(
                         .background(Color(0xFF1E293B))
                         .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
                 ) {
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(
+                                    text = "Ajustes de Detección e IP",
+                                    fontSize = 12.sp,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Umbral: ${(state.nearThreshold * 100).toInt()}% • IP / Benchmark",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFF38BDF8)
+                                )
+                            }
+                        },
+                        onClick = {
+                            showOverflowMenu = false
+                            onOpenDetectionSettings()
+                        }
+                    )
                     DropdownMenuItem(
                         text = {
                             Column {
@@ -582,31 +632,67 @@ fun StreamCard(
 }
 
 @Composable
-fun SpatialZonesCard(zoneResult: ZoneResult?) {
+fun SpatialZonesCard(
+    zoneResult: ZoneResult?,
+    nearThreshold: Float = 0.60f,
+    onOpenThresholdSettings: () -> Unit = {}
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = Color(0xFF131C31))
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            Text(
-                text = "SEGMENTACIÓN ESPACIAL POR ZONAS",
-                color = Color(0xFF94A3B8),
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "SEGMENTACIÓN ESPACIAL POR ZONAS",
+                    color = Color(0xFF94A3B8),
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = "UMBRAL: ${(nearThreshold * 100).toInt()}%",
+                    color = Color(0xFF38BDF8),
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .clickable { onOpenThresholdSettings() }
+                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                )
+            }
             Spacer(modifier = Modifier.height(8.dp))
 
             val left = zoneResult?.left ?: 0.0f
             val center = zoneResult?.center ?: 0.0f
             val right = zoneResult?.right ?: 0.0f
 
-            ZoneProgressBar(name = "IZQUIERDA", value = left, isNearest = zoneResult?.nearestZone == Zone.LEFT)
+            ZoneProgressBar(
+                name = "IZQUIERDA",
+                value = left,
+                nearThreshold = nearThreshold,
+                isNearest = zoneResult?.nearestZone == Zone.LEFT
+            )
             Spacer(modifier = Modifier.height(5.dp))
-            ZoneProgressBar(name = "CENTRO", value = center, isNearest = zoneResult?.nearestZone == Zone.CENTER)
+            ZoneProgressBar(
+                name = "CENTRO",
+                value = center,
+                nearThreshold = nearThreshold,
+                isNearest = zoneResult?.nearestZone == Zone.CENTER
+            )
             Spacer(modifier = Modifier.height(5.dp))
-            ZoneProgressBar(name = "DERECHA", value = right, isNearest = zoneResult?.nearestZone == Zone.RIGHT)
+            ZoneProgressBar(
+                name = "DERECHA",
+                value = right,
+                nearThreshold = nearThreshold,
+                isNearest = zoneResult?.nearestZone == Zone.RIGHT
+            )
         }
     }
 }
@@ -615,11 +701,12 @@ fun SpatialZonesCard(zoneResult: ZoneResult?) {
 fun ZoneProgressBar(
     name: String,
     value: Float,
+    nearThreshold: Float = 0.60f,
     isNearest: Boolean
 ) {
     val barColor = when {
         isNearest -> Color(0xFFEF4444)
-        value > 0.60f -> Color(0xFFF59E0B)
+        value > nearThreshold -> Color(0xFFF59E0B)
         else -> Color(0xFF38BDF8)
     }
 
@@ -954,4 +1041,309 @@ fun PocketModeBatteryTipCard(
             }
         }
     }
+}
+
+@Composable
+fun DetectionSettingsDialog(
+    nearThreshold: Float,
+    initialIp: String,
+    isBenchmarkRunning: Boolean,
+    benchmarkProgress: Float,
+    benchmarkPhase: String,
+    benchmarkMetrics: BenchmarkMetrics?,
+    onThresholdChange: (Float) -> Unit,
+    onConnectManualIp: (String) -> Unit,
+    onRunBenchmark: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var ipText by remember(initialIp) { mutableStateOf(initialIp) }
+
+    AlertDialog(
+        onDismissRequest = {
+            if (!isBenchmarkRunning) onDismiss()
+        },
+        containerColor = Color(0xFF0F172A),
+        titleContentColor = Color.White,
+        textContentColor = Color(0xFFCBD5E1),
+        title = {
+            Text(
+                text = "AJUSTES DE DETECCIÓN E IP",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+                color = Color(0xFF38BDF8)
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // 1. Control de umbral de cercanía
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Umbral de Cercanía: ${(nearThreshold * 100).toInt()}%",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            color = Color.White
+                        )
+                        TextButton(
+                            onClick = { onThresholdChange(0.60f) },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                            modifier = Modifier.height(26.dp)
+                        ) {
+                            Text(
+                                text = "Restablecer (60%)",
+                                fontSize = 10.sp,
+                                color = Color(0xFF38BDF8),
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                    Text(
+                        text = "Menor % avisa desde más lejos; mayor % solo al estar muy cerca (rango 40% - 90%).",
+                        fontSize = 10.sp,
+                        color = Color(0xFF94A3B8),
+                        lineHeight = 13.sp
+                    )
+                    Slider(
+                        value = nearThreshold,
+                        onValueChange = onThresholdChange,
+                        valueRange = 0.40f..0.90f,
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFF38BDF8),
+                            activeTrackColor = Color(0xFF0284C7),
+                            inactiveTrackColor = Color(0xFF334155)
+                        )
+                    )
+                }
+
+                // 2. Conexión manual por IP (opcional / respaldo)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "Conexión Manual XIAO (Opcional)",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        color = Color.White
+                    )
+                    OutlinedTextField(
+                        value = ipText,
+                        onValueChange = { ipText = it.trim() },
+                        placeholder = {
+                            Text(
+                                text = "Ej: 192.168.43.120",
+                                fontSize = 11.sp,
+                                color = Color(0xFF64748B)
+                            )
+                        },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Button(
+                        onClick = { onConnectManualIp(ipText) },
+                        enabled = ipText.isNotBlank() && !isBenchmarkRunning,
+                        modifier = Modifier.fillMaxWidth().height(36.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text(
+                            text = "Conectar a IP Manual",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+
+                // 3. Benchmark Interactivo de Hardware (GPU vs CPU)
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Benchmark de Rendimiento IA",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            color = Color.White
+                        )
+                        if (benchmarkMetrics != null && !isBenchmarkRunning) {
+                            Text(
+                                text = "Hora: ${benchmarkMetrics.completedAtTime}",
+                                fontSize = 9.sp,
+                                color = Color(0xFF94A3B8),
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = onRunBenchmark,
+                        enabled = !isBenchmarkRunning,
+                        modifier = Modifier.fillMaxWidth().height(36.dp),
+                        border = BorderStroke(
+                            1.dp,
+                            if (isBenchmarkRunning) Color(0xFF38BDF8) else Color(0xFFA855F7)
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
+                        Text(
+                            text = when {
+                                isBenchmarkRunning -> "Evaluando Hardware... ${(benchmarkProgress * 100).toInt()}%"
+                                benchmarkMetrics != null -> "Volver a Ejecutar Benchmark"
+                                else -> "Iniciar Benchmark GPU vs CPU"
+                            },
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isBenchmarkRunning) Color(0xFF38BDF8) else Color(0xFFD8B4FE),
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+
+                    // Barra de progreso en vivo durante el benchmark
+                    if (isBenchmarkRunning) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                            border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.5f))
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = benchmarkPhase.ifBlank { "Preparando prueba..." },
+                                        fontSize = 9.sp,
+                                        color = Color(0xFF38BDF8),
+                                        fontFamily = FontFamily.Monospace,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(
+                                        text = "${(benchmarkProgress * 100).toInt()}%",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                                LinearProgressIndicator(
+                                    progress = { benchmarkProgress },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(6.dp)
+                                        .clip(RoundedCornerShape(3.dp)),
+                                    color = Color(0xFF38BDF8),
+                                    trackColor = Color(0xFF0F172A)
+                                )
+                            }
+                        }
+                    }
+
+                    // Tarjeta comparativa de resultados al finalizar
+                    if (benchmarkMetrics != null && !isBenchmarkRunning) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
+                            border = BorderStroke(1.dp, Color(0xFF334155))
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                val gpuBetter = benchmarkMetrics.gpuAvailable &&
+                                        benchmarkMetrics.gpuMedianMs < benchmarkMetrics.cpuMedianMs
+                                val recommendation = if (gpuBetter) {
+                                    val speedup = benchmarkMetrics.cpuMedianMs / benchmarkMetrics.gpuMedianMs
+                                    "ÓPTIMO: GPU (${String.format("%.2f", speedup)}x más rápida que CPU)"
+                                } else {
+                                    "ÓPTIMO: CPU 4 Hilos"
+                                }
+                                Text(
+                                    text = recommendation,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF4ADE80),
+                                    fontFamily = FontFamily.Monospace
+                                )
+
+                                // Fila GPU
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "GPU (FP16):",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFF38BDF8),
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                    Text(
+                                        text = if (benchmarkMetrics.gpuAvailable) {
+                                            "${String.format("%.1f", benchmarkMetrics.gpuMedianMs)} ms (p95: ${String.format("%.0f", benchmarkMetrics.gpuP95Ms)} ms | ~${String.format("%.1f", benchmarkMetrics.gpuFps)} FPS)"
+                                        } else {
+                                            "No disponible"
+                                        },
+                                        fontSize = 10.sp,
+                                        color = Color.White,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+
+                                // Fila CPU
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "CPU (4H):",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Color(0xFFF59E0B),
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                    Text(
+                                        text = "${String.format("%.1f", benchmarkMetrics.cpuMedianMs)} ms (p95: ${String.format("%.0f", benchmarkMetrics.cpuP95Ms)} ms | ~${String.format("%.1f", benchmarkMetrics.cpuFps)} FPS)",
+                                        fontSize = 10.sp,
+                                        color = Color.White,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !isBenchmarkRunning
+            ) {
+                Text(
+                    text = "Cerrar",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isBenchmarkRunning) Color(0xFF475569) else Color(0xFF38BDF8),
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+    )
 }

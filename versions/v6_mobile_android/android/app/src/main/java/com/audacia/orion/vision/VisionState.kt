@@ -12,9 +12,20 @@ enum class ConnectionStatus {
     SEARCHING,
     CONNECTING,
     STREAMING,
-    DEMO_MODE,
     ERROR
 }
+
+data class BenchmarkMetrics(
+    val gpuAvailable: Boolean,
+    val gpuMedianMs: Double,
+    val gpuP95Ms: Double,
+    val gpuFps: Double,
+    val cpuMedianMs: Double,
+    val cpuP95Ms: Double,
+    val cpuFps: Double,
+    val iterations: Int,
+    val completedAtTime: String
+)
 
 data class VisionState(
     val connectionStatus: ConnectionStatus = ConnectionStatus.IDLE,
@@ -29,7 +40,12 @@ data class VisionState(
     val framesProcessed: Long = 0,
     val activeAlert: Alert? = null,
     val feedbackSettings: FeedbackSettings = FeedbackSettings(),
+    val nearThreshold: Float = 0.60f,
     val statusMessage: String = "Listo para iniciar",
+    val isBenchmarkRunning: Boolean = false,
+    val benchmarkProgress: Float = 0f,
+    val benchmarkPhase: String = "",
+    val benchmarkMetrics: BenchmarkMetrics? = null,
     val benchmarkSummary: String? = null,
     val watchdogState: WatchdogState = WatchdogState.OK,
     val thermalLevel: ThermalThrottleLevel = ThermalThrottleLevel.NOMINAL

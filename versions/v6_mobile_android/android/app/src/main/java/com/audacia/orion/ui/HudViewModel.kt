@@ -35,10 +35,6 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
         pipeline.connectDirect(ip)
     }
 
-    fun startDemo() {
-        pipeline.startDemoMode()
-    }
-
     fun stop() {
         pipeline.stop()
     }
@@ -51,9 +47,15 @@ class HudViewModel(application: Application) : AndroidViewModel(application) {
         pipeline.updateFeedbackSettings(settings)
     }
 
+    fun updateNearThreshold(threshold: Float) {
+        pipeline.updateNearThreshold(threshold)
+    }
+
+    fun getLastKnownIp(): String? = pipeline.getLastKnownIp()
+
     fun runBenchmark(onDone: (String) -> Unit = {}) {
         viewModelScope.launch {
-            val result = pipeline.runDeviceBenchmark(50)
+            val result = pipeline.runDeviceBenchmark(25)
             onDone(result)
         }
     }

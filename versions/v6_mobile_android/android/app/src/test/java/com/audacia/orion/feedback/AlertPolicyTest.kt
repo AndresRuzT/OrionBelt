@@ -91,4 +91,18 @@ class AlertPolicyTest {
         assertNotNull(alert)
         assertEquals("La alerta debe apuntar a la zona izquierda", Zone.LEFT, alert?.zone)
     }
+
+    @Test
+    fun dynamicNearThresholdAdjustmentClampsAndTriggersCorrectly() {
+        val policy = AlertPolicy(nearThreshold = 0.60f)
+        val rMedium = ZoneResult(Action.FORWARD, 0.0f, 0.2f, 0.50f, 0.2f, 0.3f, null)
+
+        // Con umbral 0.60, center=0.50 no dispara alerta
+        assertNull(policy.update(rMedium, 1000L))
+
+        // Al bajar el umbral a 0.45, center=0.50 sí dispara alerta
+        policy.nearThreshold = 0.45f
+        val alert = policy.update(rMedium, 2000L)
+        assertNotNull("Con umbral 0.45 debe disparar alerta en 0.50", alert)
+    }
 }

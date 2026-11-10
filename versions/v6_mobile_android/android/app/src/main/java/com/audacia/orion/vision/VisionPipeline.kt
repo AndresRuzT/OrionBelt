@@ -13,6 +13,7 @@ import com.audacia.orion.net.XiaoEndpoint
 import com.audacia.orion.resilience.CameraWatchdog
 import com.audacia.orion.resilience.ThermalGovernor
 import com.audacia.orion.resilience.WatchdogState
+import com.audacia.orion.settings.OrionPreferences
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -46,22 +47,34 @@ class VisionPipeline(
     private val scope: CoroutineScope
 ) : AutoCloseable {
 
-    private val _state = MutableStateFlow(VisionState())
+    private val preferences = OrionPreferences(context)
+    private val _state = MutableStateFlow(
+        VisionState(
+            feedbackSettings = preferences.getFeedbackSettings(),
+            nearThreshold = preferences.getNearThreshold()
+        )
+    )
     val state: StateFlow<VisionState> = _state.asStateFlow()
 
-    private var preferredBackend = InferenceBackend.GPU
+    private var preferredBackend = preferences.getPreferredBackend()
+    @Volatile
+    private var currentNearThreshold: Float = preferences.getNearThreshold()
     private var depthEstimator: DepthEstimator? = null
     private val preprocessor = Preprocessor()
     private val discovery = XiaoDiscovery(context)
     private val streamReader = MjpegStreamReader()
-    val feedback = FeedbackCoordinator(context)
+    val feedback = FeedbackCoordinator(context).apply {
+        settings = _state.value.feedbackSettings
+        alertPolicy.nearThreshold = currentNearThreshold
+    }
     val watchdog = CameraWatchdog(timeoutMs = 3500L)
     val thermalGovernor = ThermalGovernor(context, feedback.voice) { level ->
         _state.update { it.copy(thermalLevel = level) }
     }
 
     private var pipelineJob: Job? = null
-    private var demoJob: Job? = null
+    @Volatile
+    private var pauseInferenceForBenchmark: Boolean = false
     private val frameChannel = Channel<ByteArray>(capacity = Channel.CONFLATED)
 
     // Hilo único dedicado de alta prioridad para mantener la afinidad del contexto EGL/OpenCL
@@ -119,6 +132,7 @@ class VisionPipeline(
 
     fun switchBackend(backend: InferenceBackend) {
         preferredBackend = backend
+        preferences.savePreferredBackend(backend)
         scope.launch(inferenceDispatcher) {
             initEstimator(backend)
         }
@@ -126,8 +140,19 @@ class VisionPipeline(
 
     fun updateFeedbackSettings(settings: FeedbackSettings) {
         feedback.settings = settings
+        preferences.saveFeedbackSettings(settings)
         _state.update { it.copy(feedbackSettings = settings) }
     }
+
+    fun updateNearThreshold(threshold: Float) {
+        val clamped = OrionPreferences.clampThreshold(threshold)
+        currentNearThreshold = clamped
+        feedback.alertPolicy.nearThreshold = clamped
+        preferences.saveNearThreshold(clamped)
+        _state.update { it.copy(nearThreshold = clamped) }
+    }
+
+    fun getLastKnownIp(): String? = discovery.getLastKnownEndpoint()?.ip
 
     /**
      * Inicia el autodescubrimiento continuo y supervisor de reconexión.
@@ -348,7 +373,14 @@ class VisionPipeline(
         var currentFps = 0f
 
         while (scope.isActive) {
+            if (pauseInferenceForBenchmark) {
+                delay(40)
+                continue
+            }
             val frameBytes = frameChannel.receive()
+            if (pauseInferenceForBenchmark) {
+                continue
+            }
             val totalStart = System.nanoTime()
             val bufIdx = (frameCount % ringBufferSize).toInt()
 
@@ -381,7 +413,7 @@ class VisionPipeline(
 
             // 4. Normalización y segmentación espacial (reutilizando reusableNormDepth)
             val normDepth = DepthAnalyzer.normalize(rawDepth, outArray = reusableNormDepth)
-            val zoneResult = DepthAnalyzer.analyze(normDepth, 256, 256)
+            val zoneResult = DepthAnalyzer.analyze(normDepth, 256, 256, nearThreshold = currentNearThreshold)
 
             // 5. Retroalimentación sensorial (háptica, audio estéreo, voz)
             val alert = feedback.processFrameResult(zoneResult, endpoint)
@@ -439,154 +471,140 @@ class VisionPipeline(
     }
 
     /**
-     * Modo demostración / prueba sintética para validar el pipeline de IA
-     * en el teléfono sin requerir la presencia inmediata del hardware XIAO.
+     * Ejecuta el benchmark de inferencia en GPU y CPU directamente en el dispositivo móvil,
+     * emitiendo progreso iteración por iteración a la interfaz de usuario sin congelarla.
      */
-    fun startDemoMode() {
-        stop()
-        demoJob = scope.launch(inferenceDispatcher) {
-            _state.update {
-                it.copy(
-                    connectionStatus = ConnectionStatus.DEMO_MODE,
-                    statusMessage = "Modo Demo IA: Generando frames sintéticos..."
-                )
-            }
-
-            var tick = 0
-            val testBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(testBitmap)
-            val bgPaint = Paint().apply { color = android.graphics.Color.DKGRAY }
-            val circlePaint = Paint().apply { color = android.graphics.Color.WHITE; isAntiAlias = true }
-
-            var fpsLastTime = System.currentTimeMillis()
-            var fpsFrameCounter = 0
-            var currentFps = 0f
-            var frameCount = 0L
-
-            while (isActive) {
-                val loopStart = System.nanoTime()
-                val bufIdx = (frameCount % ringBufferSize).toInt()
-
-                // Dibujar obstáculo simulado que se desplaza horizontalmente
-                canvas.drawRect(0f, 0f, 256f, 256f, bgPaint)
-                val posX = 64f + 64f * Math.sin(tick * 0.1).toFloat()
-                val radius = 40f + 20f * Math.cos(tick * 0.05).toFloat()
-                canvas.drawCircle(posX + 64f, 128f, radius, circlePaint)
-                tick++
-
-                // Inferencia en vivo con TFLite
-                val inputBuffer = preprocessor.process(testBitmap)
-                val estimator = depthEstimator
-                if (estimator != null) {
-                    val inferStart = System.nanoTime()
-                    val rawDepth = estimator.infer(inputBuffer)
-                    val inferMs = (System.nanoTime() - inferStart) / 1_000_000
-
-                    val normDepth = DepthAnalyzer.normalize(rawDepth, outArray = reusableNormDepth)
-                    val zoneResult = DepthAnalyzer.analyze(normDepth, 256, 256)
-                    val alert = feedback.processFrameResult(zoneResult, null)
-
-                    val colorized = MagmaColorizer.toBitmap(
-                        depthNorm = normDepth,
-                        width = 256,
-                        height = 256,
-                        reuseBitmap = depthBitmaps[bufIdx],
-                        reusablePixels = reusablePixels
-                    )
-
-                    val totalLatencyMs = (System.nanoTime() - loopStart) / 1_000_000
-                    frameCount++
-                    fpsFrameCounter++
-
-                    val now = System.currentTimeMillis()
-                    val elapsedMs = now - fpsLastTime
-                    if (elapsedMs >= 1000) {
-                        currentFps = (fpsFrameCounter * 1000f) / elapsedMs
-                        fpsFrameCounter = 0
-                        fpsLastTime = now
-                    }
-
-                    _state.update {
-                        it.copy(
-                            cameraBitmap = testBitmap,
-                            depthBitmap = colorized,
-                            zoneResult = zoneResult,
-                            activeAlert = alert,
-                            inferenceMs = inferMs,
-                            totalLatencyMs = totalLatencyMs,
-                            fps = currentFps,
-                            framesProcessed = frameCount,
-                            activeBackend = estimator.activeBackend
-                        )
-                    }
-                }
-
-                delay(33) // ~30 FPS
-            }
-        }
-    }
-
-    /**
-     * Ejecuta el benchmark de 50 inferencias en GPU y 50 en CPU directamente en el dispositivo móvil.
-     * Reporta la mediana y el percentil 95 (p95) en milisegundos para ambos backends.
-     */
-    suspend fun runDeviceBenchmark(iterations: Int = 50): String = withContext(inferenceDispatcher) {
-        _state.update { it.copy(statusMessage = "Ejecutando benchmark móvil ($iterations iteraciones)...") }
-
-        val testBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(testBitmap)
-        canvas.drawColor(android.graphics.Color.GRAY)
-
-        val input = preprocessor.process(testBitmap)
-
-        fun benchmarkBackend(backend: InferenceBackend): Pair<Double, Double> {
-            val estimator = DepthEstimator(context, preferredBackend = backend)
-            // Warmup (3 iteraciones)
-            repeat(3) { estimator.infer(input) }
-
-            val times = DoubleArray(iterations)
-            for (i in 0 until iterations) {
-                val start = System.nanoTime()
-                estimator.infer(input)
-                val durationMs = (System.nanoTime() - start) / 1_000_000.0
-                times[i] = durationMs
-            }
-            estimator.close()
-            times.sort()
-            val median = times[iterations / 2]
-            val p95 = times[(iterations * 0.95).toInt()]
-            return Pair(median, p95)
+    suspend fun runDeviceBenchmark(iterations: Int = 25): String {
+        if (_state.value.isBenchmarkRunning) {
+            return _state.value.benchmarkSummary.orEmpty()
         }
 
-        val (gpuMed, gpuP95) = try {
-            benchmarkBackend(InferenceBackend.GPU)
-        } catch (e: Exception) {
-            Pair(-1.0, -1.0)
-        }
-
-        val (cpuMed, cpuP95) = benchmarkBackend(InferenceBackend.CPU)
-
-        // Restaurar backend preferido
-        initEstimator(preferredBackend)
-
-        val gpuStr = if (gpuMed > 0) {
-            val gpuFps = String.format("%.1f", 1000.0 / gpuMed)
-            "GPU: Mediana ${String.format("%.1f", gpuMed)} ms (p95: ${String.format("%.1f", gpuP95)} ms, ~$gpuFps FPS)"
-        } else {
-            "GPU: No disponible en este dispositivo"
-        }
-
-        val cpuFps = String.format("%.1f", 1000.0 / cpuMed)
-        val cpuStr = "CPU (4 hilos): Mediana ${String.format("%.1f", cpuMed)} ms (p95: ${String.format("%.1f", cpuP95)} ms, ~$cpuFps FPS)"
-
-        val resultSummary = "$gpuStr\n$cpuStr"
+        // Actualización instantánea (0 ms) antes de cambiar al hilo de inferencia
+        pauseInferenceForBenchmark = true
         _state.update {
             it.copy(
-                benchmarkSummary = resultSummary,
-                statusMessage = "Benchmark completado"
+                isBenchmarkRunning = true,
+                benchmarkProgress = 0.02f,
+                benchmarkPhase = "Preparando motor GPU OpenGL (Warmup)...",
+                benchmarkMetrics = null,
+                benchmarkSummary = null,
+                statusMessage = "Ejecutando Benchmark GPU/CPU..."
             )
         }
-        resultSummary
+
+        return try {
+            withContext(inferenceDispatcher) {
+                val testBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(testBitmap)
+                canvas.drawColor(android.graphics.Color.GRAY)
+                val input = preprocessor.process(testBitmap)
+
+                suspend fun benchmarkBackend(
+                    backend: InferenceBackend,
+                    label: String,
+                    baseProgress: Float
+                ): Pair<Double, Double> {
+                    _state.update {
+                        it.copy(
+                            benchmarkPhase = "Inicializando $label (3 iteraciones de calentamiento)..."
+                        )
+                    }
+                    val estimator = DepthEstimator(context, preferredBackend = backend)
+                    if (backend == InferenceBackend.GPU && estimator.activeBackend != InferenceBackend.GPU) {
+                        estimator.close()
+                        return Pair(-1.0, -1.0)
+                    }
+
+                    // Warmup (3 iteraciones)
+                    repeat(3) {
+                        estimator.infer(input)
+                    }
+
+                    val times = DoubleArray(iterations)
+                    for (i in 0 until iterations) {
+                        val start = System.nanoTime()
+                        estimator.infer(input)
+                        val durationMs = (System.nanoTime() - start) / 1_000_000.0
+                        times[i] = durationMs
+
+                        val stepProgress = baseProgress + ((i + 1).toFloat() / (iterations * 2f)) * 0.96f
+                        _state.update {
+                            it.copy(
+                                benchmarkProgress = stepProgress.coerceIn(0.02f, 0.99f),
+                                benchmarkPhase = "Evaluando $label: iteración ${i + 1} / $iterations (${String.format("%.1f", durationMs)} ms)"
+                            )
+                        }
+                        kotlinx.coroutines.yield()
+                    }
+                    estimator.close()
+                    times.sort()
+                    val median = times[iterations / 2]
+                    val p95 = times[(iterations * 0.95).toInt().coerceAtMost(iterations - 1)]
+                    return Pair(median, p95)
+                }
+
+                val (gpuMed, gpuP95) = try {
+                    benchmarkBackend(InferenceBackend.GPU, "GPU (OpenGL FP16)", 0.02f)
+                } catch (e: Exception) {
+                    Pair(-1.0, -1.0)
+                }
+
+                val (cpuMed, cpuP95) = benchmarkBackend(InferenceBackend.CPU, "CPU (XNNPACK 4 Hilos)", 0.50f)
+
+                // Restaurar backend preferido del usuario
+                _state.update {
+                    it.copy(
+                        benchmarkProgress = 0.99f,
+                        benchmarkPhase = "Restaurando motor de inferencia..."
+                    )
+                }
+                initEstimator(preferredBackend)
+
+                val gpuAvail = gpuMed > 0
+                val gpuFpsVal = if (gpuAvail) 1000.0 / gpuMed else 0.0
+                val cpuFpsVal = if (cpuMed > 0) 1000.0 / cpuMed else 0.0
+
+                val timeStr = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                    .format(java.util.Date())
+
+                val metrics = BenchmarkMetrics(
+                    gpuAvailable = gpuAvail,
+                    gpuMedianMs = gpuMed,
+                    gpuP95Ms = gpuP95,
+                    gpuFps = gpuFpsVal,
+                    cpuMedianMs = cpuMed,
+                    cpuP95Ms = cpuP95,
+                    cpuFps = cpuFpsVal,
+                    iterations = iterations,
+                    completedAtTime = timeStr
+                )
+
+                val gpuStr = if (gpuAvail) {
+                    "GPU: Mediana ${String.format("%.1f", gpuMed)} ms (p95: ${String.format("%.1f", gpuP95)} ms, ~${String.format("%.1f", gpuFpsVal)} FPS)"
+                } else {
+                    "GPU: No disponible en este dispositivo"
+                }
+                val cpuStr = "CPU (4 hilos): Mediana ${String.format("%.1f", cpuMed)} ms (p95: ${String.format("%.1f", cpuP95)} ms, ~${String.format("%.1f", cpuFpsVal)} FPS)"
+                val resultSummary = "$gpuStr\n$cpuStr"
+
+                _state.update {
+                    it.copy(
+                        isBenchmarkRunning = false,
+                        benchmarkProgress = 1.0f,
+                        benchmarkPhase = "Benchmark completado ($timeStr)",
+                        benchmarkMetrics = metrics,
+                        benchmarkSummary = resultSummary,
+                        statusMessage = "Benchmark completado ($timeStr)"
+                    )
+                }
+                resultSummary
+            }
+        } finally {
+            pauseInferenceForBenchmark = false
+            if (_state.value.isBenchmarkRunning) {
+                _state.update { it.copy(isBenchmarkRunning = false) }
+            }
+        }
     }
 
     fun stop(silent: Boolean = false) {
@@ -594,8 +612,6 @@ class VisionPipeline(
                 _state.value.connectionStatus == ConnectionStatus.CONNECTING
         pipelineJob?.cancel()
         pipelineJob = null
-        demoJob?.cancel()
-        demoJob = null
         _state.update {
             it.copy(
                 connectionStatus = ConnectionStatus.IDLE,
