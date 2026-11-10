@@ -76,15 +76,17 @@ class VisionPipeline(
     }
     private val inferenceDispatcher = inferenceExecutor.asCoroutineDispatcher()
 
-    // Buffers pre-asignados con doble buffer (A/B) para cero presión sobre el Garbage Collector
+    // Buffers pre-asignados con triple buffer (A/B/C) para cero presión sobre el Garbage Collector
+    // y cero colisiones con el VSYNC de la pantalla (evita que un Bitmap se sobreescriba en el Paso 1
+    // mientras aún está visible o en tránsito hacia la interfaz Compose).
+    private val ringBufferSize = 3
     private val reusablePixels = IntArray(256 * 256)
     private val reusableNormDepth = FloatArray(256 * 256)
-    private val cameraBitmaps = arrayOfNulls<Bitmap>(2)
+    private val cameraBitmaps = arrayOfNulls<Bitmap>(ringBufferSize)
     private val depthBitmaps: Array<Bitmap> by lazy {
-        arrayOf(
-            Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888),
+        Array(ringBufferSize) {
             Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
-        )
+        }
     }
 
     init {
@@ -348,9 +350,9 @@ class VisionPipeline(
         while (scope.isActive) {
             val frameBytes = frameChannel.receive()
             val totalStart = System.nanoTime()
-            val bufIdx = (frameCount % 2L).toInt()
+            val bufIdx = (frameCount % ringBufferSize).toInt()
 
-            // 1. Decodificar JPEG reutilizando Bitmap pre-asignado (doble buffer A/B para cero GC)
+            // 1. Decodificar JPEG reutilizando Bitmap pre-asignado (triple buffer A/B/C para cero GC y sin parpadeo)
             val decodeOptions = BitmapFactory.Options().apply {
                 inMutable = true
                 inPreferredConfig = Bitmap.Config.ARGB_8888
@@ -384,7 +386,7 @@ class VisionPipeline(
             // 5. Retroalimentación sensorial (háptica, audio estéreo, voz)
             val alert = feedback.processFrameResult(zoneResult, endpoint)
 
-            // 6. Generación de mapa de calor Magma en doble buffer (A/B)
+            // 6. Generación de mapa de calor Magma en triple buffer (A/B/C)
             val colorizedBitmap = MagmaColorizer.toBitmap(
                 depthNorm = normDepth,
                 width = 256,
@@ -392,6 +394,9 @@ class VisionPipeline(
                 reuseBitmap = depthBitmaps[bufIdx],
                 reusablePixels = reusablePixels
             )
+
+            cameraBitmap.prepareToDraw()
+            colorizedBitmap.prepareToDraw()
 
             // 7. Cálculo de FPS y latencia total
             val totalEnd = System.nanoTime()
@@ -460,7 +465,7 @@ class VisionPipeline(
 
             while (isActive) {
                 val loopStart = System.nanoTime()
-                val bufIdx = (frameCount % 2L).toInt()
+                val bufIdx = (frameCount % ringBufferSize).toInt()
 
                 // Dibujar obstáculo simulado que se desplaza horizontalmente
                 canvas.drawRect(0f, 0f, 256f, 256f, bgPaint)
