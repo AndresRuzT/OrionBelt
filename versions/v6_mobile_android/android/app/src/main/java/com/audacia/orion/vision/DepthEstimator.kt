@@ -5,6 +5,7 @@ import android.content.res.AssetFileDescriptor
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
+import org.tensorflow.lite.gpu.GpuDelegateFactory
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -52,7 +53,10 @@ class DepthEstimator(
             try {
                 val compatList = CompatibilityList()
                 if (compatList.isDelegateSupportedOnThisDevice) {
-                    val delegateOptions = compatList.bestOptionsForThisDevice
+                    val delegateOptions = compatList.bestOptionsForThisDevice.apply {
+                        setPrecisionLossAllowed(true) // FP16 nativo para máxima velocidad en shaders GPU
+                        setInferencePreference(GpuDelegateFactory.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
+                    }
                     val delegate = GpuDelegate(delegateOptions)
                     options.addDelegate(delegate)
                     gpuDelegate = delegate
@@ -66,6 +70,7 @@ class DepthEstimator(
         }
 
         if (!initializedGpu) {
+            options.setUseXNNPACK(true)
             options.setNumThreads(4)
             activeBackend = InferenceBackend.CPU
         }

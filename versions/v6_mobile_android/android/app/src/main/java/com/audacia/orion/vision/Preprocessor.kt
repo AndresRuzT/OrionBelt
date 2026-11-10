@@ -1,14 +1,18 @@
 package com.audacia.orion.vision
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 
 /**
- * Preprocesador de imágenes optimizado sin asignación dinámica de memoria por frame.
+ * Preprocesador de imágenes optimizado con cero asignación dinámica de memoria por frame.
  *
- * Escala bilinealmente a 256x256 y normaliza con las constantes canónicas de ImageNet:
+ * Reutiliza un único Bitmap escalado (256x256) y Canvas con filtrado bilineal y normaliza
+ * con las constantes canónicas de ImageNet:
  * Mean: [0.485, 0.456, 0.406], Std: [0.229, 0.224, 0.225].
  */
 class Preprocessor(
@@ -28,19 +32,26 @@ class Preprocessor(
     }
 
     private val intValues = IntArray(targetWidth * targetHeight)
+    private val reusableScaledBitmap: Bitmap by lazy {
+        Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+    }
+    private val scaleCanvas: Canvas by lazy { Canvas(reusableScaledBitmap) }
+    private val scalePaint: Paint by lazy { Paint(Paint.FILTER_BITMAP_FLAG) }
+    private val dstRect: Rect by lazy { Rect(0, 0, targetWidth, targetHeight) }
 
     val inputBuffer: FloatBuffer = ByteBuffer.allocateDirect(1 * targetWidth * targetHeight * 3 * 4)
         .order(ByteOrder.nativeOrder())
         .asFloatBuffer()
 
     fun process(bitmap: Bitmap): FloatBuffer {
-        val scaledBitmap = if (bitmap.width == targetWidth && bitmap.height == targetHeight) {
+        val sourceForPixels = if (bitmap.width == targetWidth && bitmap.height == targetHeight) {
             bitmap
         } else {
-            Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true)
+            scaleCanvas.drawBitmap(bitmap, null, dstRect, scalePaint)
+            reusableScaledBitmap
         }
 
-        scaledBitmap.getPixels(intValues, 0, targetWidth, 0, 0, targetWidth, targetHeight)
+        sourceForPixels.getPixels(intValues, 0, targetWidth, 0, 0, targetWidth, targetHeight)
 
         inputBuffer.rewind()
         for (i in 0 until targetWidth * targetHeight) {
@@ -55,10 +66,6 @@ class Preprocessor(
             inputBuffer.put(b)
         }
         inputBuffer.rewind()
-
-        if (scaledBitmap != bitmap) {
-            scaledBitmap.recycle()
-        }
 
         return inputBuffer
     }

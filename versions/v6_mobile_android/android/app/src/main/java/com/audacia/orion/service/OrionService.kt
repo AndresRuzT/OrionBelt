@@ -60,22 +60,16 @@ class OrionService : Service() {
         createNotificationChannel()
         startForegroundServiceWithNotification("Iniciando asistencia visual...")
 
-        // Actualizar la notificación persistente de forma controlada (máx 1 vez cada 3s o al cambiar estado)
-        // para evitar saturar el Binder de Android NotificationManager y degradar los FPS.
-        var lastNotificationTime = 0L
+        // Actualizar la notificación persistente únicamente al cambiar el estado de conexión
+        // para eliminar llamadas periódicas IPC a NotificationManager en el hilo principal.
         var lastStatus: ConnectionStatus? = null
 
         pipeline.state.onEach { state ->
-            val now = System.currentTimeMillis()
-            val statusChanged = state.connectionStatus != lastStatus
-            val timeElapsed = (now - lastNotificationTime) >= 3000L
-
-            if (statusChanged || (state.connectionStatus == ConnectionStatus.STREAMING && timeElapsed)) {
-                lastNotificationTime = now
+            if (state.connectionStatus != lastStatus) {
                 lastStatus = state.connectionStatus
 
                 val message = when (state.connectionStatus) {
-                    ConnectionStatus.STREAMING -> "Stream activo (${state.endpoint?.ip}) • ${String.format("%.1f", state.fps)} FPS"
+                    ConnectionStatus.STREAMING -> "Stream activo (${state.endpoint?.ip}) • Navegación en curso"
                     ConnectionStatus.SEARCHING -> "Buscando cámara XIAO..."
                     ConnectionStatus.CONNECTING -> "Conectando con cámara..."
                     ConnectionStatus.ERROR -> "Interrupción: ${state.statusMessage}"

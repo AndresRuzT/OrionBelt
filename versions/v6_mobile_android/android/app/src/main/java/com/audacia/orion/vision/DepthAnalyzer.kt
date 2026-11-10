@@ -8,7 +8,11 @@ package com.audacia.orion.vision
  */
 object DepthAnalyzer {
 
-    fun normalize(depthRaw: FloatArray, invert: Boolean = false): FloatArray {
+    fun normalize(
+        depthRaw: FloatArray,
+        invert: Boolean = false,
+        outArray: FloatArray? = null
+    ): FloatArray {
         if (depthRaw.isEmpty()) return FloatArray(0)
 
         var minVal = depthRaw[0]
@@ -20,10 +24,17 @@ object DepthAnalyzer {
         }
 
         val span = maxVal - minVal
-        val output = FloatArray(depthRaw.size)
+        val output = if (outArray != null && outArray.size == depthRaw.size) {
+            outArray
+        } else {
+            FloatArray(depthRaw.size)
+        }
 
         if (span < 1e-6f) {
             // Escena plana / oscuridad: devolver ceros para no amplificar ruido
+            if (output === outArray) {
+                output.fill(0f)
+            }
             return output
         }
 

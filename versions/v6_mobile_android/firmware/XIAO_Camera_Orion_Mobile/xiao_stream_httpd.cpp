@@ -26,10 +26,30 @@ httpd_handle_t control_httpd = NULL;
 // ----------------------------------------------------------------------------
 static volatile bool s_client_streaming = false;
 static const size_t STREAM_TX_BUF_SIZE = 65536; // 64 KB en PSRAM para empaquetado contiguo
+static const int64_t TARGET_FRAME_INTERVAL_US = 45000; // ~22 FPS máx: evita saturar TCP_SND_QUEUELEN en Wi-Fi 2.4 GHz
 static uint8_t *s_tx_buf = NULL;
 
 bool isClientStreaming() {
     return s_client_streaming;
+}
+
+// Envía un bloque completo por el socket HTTP en una sola transacción lógica (sin fragmentación chunked)
+static esp_err_t send_all(httpd_req_t *req, const char *buf, size_t len) {
+    size_t sent = 0;
+    int retries = 0;
+    while (sent < len) {
+        int ret = httpd_send(req, buf + sent, len - sent);
+        if (ret > 0) {
+            sent += (size_t)ret;
+            retries = 0;
+        } else if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++retries > 3) return ESP_FAIL;
+            vTaskDelay(pdMS_TO_TICKS(5));
+        } else {
+            return ESP_FAIL;
+        }
+    }
+    return ESP_OK;
 }
 
 static esp_err_t stream_handler(httpd_req_t *req) {
@@ -47,23 +67,31 @@ static esp_err_t stream_handler(httpd_req_t *req) {
         }
     }
 
-    // Optimización de socket TCP para streaming continuo sin fragmentación excesiva
+    // Optimización de socket TCP para envío directo de bloques completos
     int sockfd = httpd_req_to_sockfd(req);
     if (sockfd >= 0) {
         int nodelay = 1;
         setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char *)&nodelay, sizeof(nodelay));
     }
 
-    res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
-    if (res != ESP_OK) return res;
+    // Enviar cabecera HTTP 200 OK directa (sin Transfer-Encoding: chunked) para evitar
+    // los micro-paquetes de 2 y 5 bytes que saturan los 16 slots de TCP_SND_QUEUELEN en LwIP
+    static const char *STREAM_HTTP_HEADER =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: multipart/x-mixed-replace;boundary=" PART_BOUNDARY "\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n"
+        "Connection: close\r\n"
+        "X-Framerate: 22\r\n\r\n";
 
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-    httpd_resp_set_hdr(req, "X-Framerate", "30");
+    res = send_all(req, STREAM_HTTP_HEADER, strlen(STREAM_HTTP_HEADER));
+    if (res != ESP_OK) return res;
 
     s_client_streaming = true;
 
     while (true) {
+        int64_t frame_start_us = esp_timer_get_time();
+
         // 1. Obtener fotograma del buffer DMA (sincronizado por VSYNC del OV2640)
         fb = esp_camera_fb_get();
         if (!fb) {
@@ -80,19 +108,17 @@ static esp_err_t stream_handler(httpd_req_t *req) {
             if (s_tx_buf != NULL && (hlen + jpg_len) <= STREAM_TX_BUF_SIZE) {
                 // 2. DESACOPLE INMEDIATO DE DMA: Copiar cabecera + JPEG a memoria de transmisión (~15 us)
                 // y liberar el buffer DMA de la cámara ANTES de transmitir por Wi-Fi.
-                // Así las fluctuaciones de red nunca bloquean al sensor OV2640.
                 memcpy(s_tx_buf, part_buf, hlen);
                 memcpy(s_tx_buf + hlen, fb->buf, jpg_len);
                 esp_camera_fb_return(fb);
                 fb = NULL;
 
-                // 3. Envío en UN SOLO chunk contiguo (reduce llamadas a socket TCP a la mitad)
-                res = httpd_resp_send_chunk(req, (const char *)s_tx_buf, hlen + jpg_len);
+                // 3. Envío directo en UN SOLO bloque contiguo sin envoltura chunked
+                res = send_all(req, (const char *)s_tx_buf, hlen + jpg_len);
             } else {
-                // Fallback directo si el frame superara 64 KB
-                res = httpd_resp_send_chunk(req, part_buf, hlen);
+                res = send_all(req, part_buf, hlen);
                 if (res == ESP_OK) {
-                    res = httpd_resp_send_chunk(req, (const char *)fb->buf, jpg_len);
+                    res = send_all(req, (const char *)fb->buf, jpg_len);
                 }
                 esp_camera_fb_return(fb);
                 fb = NULL;
@@ -107,8 +133,12 @@ static esp_err_t stream_handler(httpd_req_t *req) {
             break;
         }
 
-        // Ceder brevemente el paso al planificador sin introducir retrasos fijos de 10ms
-        taskYIELD();
+        // 4. Frame Pacing Determinista: regula la salida a ~22 FPS máx (45 ms/frame) y garantiza
+        // al menos 5 ms libres para que la tarea Wi-Fi/LwIP procese ACKs sin llenar la cola TCP
+        int64_t elapsed_us = esp_timer_get_time() - frame_start_us;
+        int64_t remaining_us = TARGET_FRAME_INTERVAL_US - elapsed_us;
+        uint32_t delay_ms = (remaining_us > 5000) ? (uint32_t)(remaining_us / 1000) : 5;
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 
     s_client_streaming = false;

@@ -4,6 +4,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 class DepthAnalyzerTest {
@@ -86,5 +87,18 @@ class DepthAnalyzerTest {
     @Test
     fun testPortadaFixture() {
         runFixtureTest("portada")
+    }
+
+    @Test
+    fun normalizeReusesProvidedOutputBufferWithoutAllocatingNewArray() {
+        val raw = floatArrayOf(10f, 20f, 30f, 50f)
+        val reusable = FloatArray(4)
+        val result = DepthAnalyzer.normalize(raw, invert = false, outArray = reusable)
+
+        assertSame("Debe reutilizar la misma referencia de FloatArray", reusable, result)
+        assertEquals(0.0f, result[0], 1e-5f)
+        assertEquals(0.25f, result[1], 1e-5f)
+        assertEquals(0.50f, result[2], 1e-5f)
+        assertEquals(1.0f, result[3], 1e-5f)
     }
 }

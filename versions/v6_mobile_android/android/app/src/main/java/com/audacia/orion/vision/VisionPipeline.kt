@@ -17,6 +17,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -27,6 +28,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.Executors
 
 /**
  * Pipeline integral de visión en tiempo real para ORION v6.
@@ -62,11 +64,33 @@ class VisionPipeline(
     private var demoJob: Job? = null
     private val frameChannel = Channel<ByteArray>(capacity = Channel.CONFLATED)
 
+    // Hilo único dedicado de alta prioridad para mantener la afinidad del contexto EGL/OpenCL
+    // del GpuDelegate de TensorFlow Lite y evitar penalizaciones de 30-50 ms por cambio de hilo.
+    private val inferenceExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread({
+            try {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_DISPLAY)
+            } catch (ignored: Throwable) {}
+            runnable.run()
+        }, "OrionInferenceThread").apply { isDaemon = true }
+    }
+    private val inferenceDispatcher = inferenceExecutor.asCoroutineDispatcher()
+
+    // Buffers pre-asignados con doble buffer (A/B) para cero presión sobre el Garbage Collector
     private val reusablePixels = IntArray(256 * 256)
-    private var depthBitmap: Bitmap? = null
+    private val reusableNormDepth = FloatArray(256 * 256)
+    private val cameraBitmaps = arrayOfNulls<Bitmap>(2)
+    private val depthBitmaps: Array<Bitmap> by lazy {
+        arrayOf(
+            Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888),
+            Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
+        )
+    }
 
     init {
-        initEstimator(preferredBackend)
+        scope.launch(inferenceDispatcher) {
+            initEstimator(preferredBackend)
+        }
     }
 
     private fun initEstimator(backend: InferenceBackend) {
@@ -93,7 +117,9 @@ class VisionPipeline(
 
     fun switchBackend(backend: InferenceBackend) {
         preferredBackend = backend
-        initEstimator(backend)
+        scope.launch(inferenceDispatcher) {
+            initEstimator(backend)
+        }
     }
 
     fun updateFeedbackSettings(settings: FeedbackSettings) {
@@ -238,8 +264,8 @@ class VisionPipeline(
             )
         }
 
-        // Iniciar consumidor de inferencia
-        val consumerJob = scope.launch(Dispatchers.Default) {
+        // Iniciar consumidor de inferencia sobre el hilo dedicado (preserva afinidad EGL de GpuDelegate)
+        val consumerJob = scope.launch(inferenceDispatcher) {
             runInferenceLoop(endpoint)
         }
 
@@ -311,7 +337,7 @@ class VisionPipeline(
     }
 
     /**
-     * Bucle de procesamiento de frames en tiempo real.
+     * Bucle de procesamiento de frames en tiempo real (ejecutado siempre en OrionInferenceThread).
      */
     private suspend fun runInferenceLoop(endpoint: XiaoEndpoint?) {
         var frameCount = 0L
@@ -322,40 +348,50 @@ class VisionPipeline(
         while (scope.isActive) {
             val frameBytes = frameChannel.receive()
             val totalStart = System.nanoTime()
+            val bufIdx = (frameCount % 2L).toInt()
 
-            // 1. Decodificar JPEG
+            // 1. Decodificar JPEG reutilizando Bitmap pre-asignado (doble buffer A/B para cero GC)
+            val decodeOptions = BitmapFactory.Options().apply {
+                inMutable = true
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+                inBitmap = cameraBitmaps[bufIdx]
+            }
             val cameraBitmap = try {
-                BitmapFactory.decodeByteArray(frameBytes, 0, frameBytes.size)
+                BitmapFactory.decodeByteArray(frameBytes, 0, frameBytes.size, decodeOptions)
             } catch (e: Exception) {
-                null
+                try {
+                    BitmapFactory.decodeByteArray(frameBytes, 0, frameBytes.size)
+                } catch (e2: Exception) {
+                    null
+                }
             } ?: continue
+            cameraBitmaps[bufIdx] = cameraBitmap
 
-            // 2. Preprocesamiento ImageNet
+            // 2. Preprocesamiento ImageNet (cero asignaciones de Bitmap)
             val inputBuffer = preprocessor.process(cameraBitmap)
 
-            // 3. Inferencia MiDaS
+            // 3. Inferencia MiDaS (mismo hilo nativo donde se inicializó GpuDelegate)
             val estimator = depthEstimator ?: continue
             val inferStart = System.nanoTime()
             val rawDepth = estimator.infer(inputBuffer)
             val inferEnd = System.nanoTime()
             val inferMs = (inferEnd - inferStart) / 1_000_000
 
-            // 4. Normalización y segmentación espacial
-            val normDepth = DepthAnalyzer.normalize(rawDepth)
+            // 4. Normalización y segmentación espacial (reutilizando reusableNormDepth)
+            val normDepth = DepthAnalyzer.normalize(rawDepth, outArray = reusableNormDepth)
             val zoneResult = DepthAnalyzer.analyze(normDepth, 256, 256)
 
-            // 5. Retroalimentación sensorial (háptica, audio estéreo, buzzer)
+            // 5. Retroalimentación sensorial (háptica, audio estéreo, voz)
             val alert = feedback.processFrameResult(zoneResult, endpoint)
 
-            // 6. Generación de mapa de calor Magma
+            // 6. Generación de mapa de calor Magma en doble buffer (A/B)
             val colorizedBitmap = MagmaColorizer.toBitmap(
                 depthNorm = normDepth,
                 width = 256,
                 height = 256,
-                reuseBitmap = depthBitmap,
+                reuseBitmap = depthBitmaps[bufIdx],
                 reusablePixels = reusablePixels
             )
-            depthBitmap = colorizedBitmap
 
             // 7. Cálculo de FPS y latencia total
             val totalEnd = System.nanoTime()
@@ -403,7 +439,7 @@ class VisionPipeline(
      */
     fun startDemoMode() {
         stop()
-        demoJob = scope.launch(Dispatchers.Default) {
+        demoJob = scope.launch(inferenceDispatcher) {
             _state.update {
                 it.copy(
                     connectionStatus = ConnectionStatus.DEMO_MODE,
@@ -424,6 +460,7 @@ class VisionPipeline(
 
             while (isActive) {
                 val loopStart = System.nanoTime()
+                val bufIdx = (frameCount % 2L).toInt()
 
                 // Dibujar obstáculo simulado que se desplaza horizontalmente
                 canvas.drawRect(0f, 0f, 256f, 256f, bgPaint)
@@ -440,7 +477,7 @@ class VisionPipeline(
                     val rawDepth = estimator.infer(inputBuffer)
                     val inferMs = (System.nanoTime() - inferStart) / 1_000_000
 
-                    val normDepth = DepthAnalyzer.normalize(rawDepth)
+                    val normDepth = DepthAnalyzer.normalize(rawDepth, outArray = reusableNormDepth)
                     val zoneResult = DepthAnalyzer.analyze(normDepth, 256, 256)
                     val alert = feedback.processFrameResult(zoneResult, null)
 
@@ -448,10 +485,9 @@ class VisionPipeline(
                         depthNorm = normDepth,
                         width = 256,
                         height = 256,
-                        reuseBitmap = depthBitmap,
+                        reuseBitmap = depthBitmaps[bufIdx],
                         reusablePixels = reusablePixels
                     )
-                    depthBitmap = colorized
 
                     val totalLatencyMs = (System.nanoTime() - loopStart) / 1_000_000
                     frameCount++
@@ -489,7 +525,7 @@ class VisionPipeline(
      * Ejecuta el benchmark de 50 inferencias en GPU y 50 en CPU directamente en el dispositivo móvil.
      * Reporta la mediana y el percentil 95 (p95) en milisegundos para ambos backends.
      */
-    suspend fun runDeviceBenchmark(iterations: Int = 50): String = withContext(Dispatchers.Default) {
+    suspend fun runDeviceBenchmark(iterations: Int = 50): String = withContext(inferenceDispatcher) {
         _state.update { it.copy(statusMessage = "Ejecutando benchmark móvil ($iterations iteraciones)...") }
 
         val testBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
@@ -570,6 +606,14 @@ class VisionPipeline(
         stop(silent = true)
         thermalGovernor.close()
         feedback.close()
-        depthEstimator?.close()
+        try {
+            inferenceExecutor.submit {
+                depthEstimator?.close()
+                depthEstimator = null
+            }.get(1000, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (ignored: Exception) {
+            depthEstimator?.close()
+        }
+        inferenceDispatcher.close()
     }
 }

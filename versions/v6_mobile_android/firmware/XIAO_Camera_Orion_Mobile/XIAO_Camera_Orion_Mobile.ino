@@ -196,8 +196,11 @@ void setup() {
     }
 
     // ------------------------------------------------------------------------
-    // 2. CONEXIÓN WI-FI CON PRIORIDAD
+    // 2. CONEXIÓN WI-FI CON PRIORIDAD Y BLOQUEO PERMANENTE DE MODEM-SLEEP
     // ------------------------------------------------------------------------
+    WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+        esp_wifi_set_ps(WIFI_PS_NONE);
+    });
     connectWifiPriority();
 
     // ------------------------------------------------------------------------
@@ -223,16 +226,17 @@ void setup() {
     config.pin_pwdn     = PWDN_GPIO_NUM;
     config.pin_reset    = RESET_GPIO_NUM;
 
-    // 20 MHz: Frecuencia maestra nativa para el reloj PLL del OV2640 en XIAO ESP32S3
-    config.xclk_freq_hz = 20000000;
+    // 16 MHz: Frecuencia recomendada por Seeed Studio para máxima estabilidad térmica
+    // y cero desincronización VSYNC en sesiones prolongadas
+    config.xclk_freq_hz = 16000000;
     config.pixel_format = PIXFORMAT_JPEG;
 
     if (has_psram) {
         // Inicializar buffers DMA con tamaño VGA (~61 KB por buffer en PSRAM de 8 MB)
         // para eliminar por completo cualquier riesgo de 'cam_hal: FB-OVF', y luego
-        // conmutar el sensor a QVGA (320x240) para máxima velocidad de transmisión.
+        // conmutar el sensor a QVGA (320x240) con quality=20 (~2.2 KB/frame).
         config.frame_size   = FRAMESIZE_VGA;
-        config.jpeg_quality = 18;
+        config.jpeg_quality = 20;
         config.fb_count     = 3;                  // Triple buffer DMA en PSRAM
         config.grab_mode    = CAMERA_GRAB_LATEST; // Siempre entrega el fotograma más fresco sin retraso
         config.fb_location  = CAMERA_FB_IN_PSRAM;
@@ -254,6 +258,7 @@ void setup() {
     sensor_t *s = esp_camera_sensor_get();
     if (s != NULL) {
         s->set_framesize(s, FRAMESIZE_QVGA);   // Salida QVGA (320x240) sobre buffers DMA de 61 KB (0 FB-OVF)
+        s->set_quality(s, 20);                 // ~2.2 KB por frame (cabe en 2 paquetes TCP MTU)
         s->set_brightness(s, 1);               // Brillo digital (+1)
         s->set_contrast(s, 1);                 // Contraste (+1)
         s->set_saturation(s, 0);               // Saturación neutra (0)
@@ -263,13 +268,13 @@ void setup() {
         s->set_exposure_ctrl(s, 1);            // Exposición automática (AEC)
         s->set_aec2(s, 0);                     // CRÍTICO: Desactivar Night-Mode DSP (impide dummy frames lentos de 500ms)
         s->set_gain_ctrl(s, 1);                // CRÍTICO: Activar AGC para que AEC no alargue el obturador a 1 FPS en interiores
-        s->set_gainceiling(s, GAINCEILING_2X); // Techo mínimo 2X (0): imagen limpia (~2.5-3.5 KB) sin ruido excesivo
+        s->set_gainceiling(s, GAINCEILING_2X); // Techo mínimo 2X (0): imagen limpia sin ruido térmico
         s->set_wpc(s, 1);                      // Corrección de píxeles blancos
         s->set_raw_gma(s, 1);                  // Gamma de sensor activo
         s->set_lenc(s, 1);                     // Corrección de lente
         s->set_dcw(s, 1);                      // Downsize digital activo
     }
-    Serial.println("✅ [CAM] Sensor OV2640 activo en QVGA (320x240) a 20 MHz con buffers DMA holgados.");
+    Serial.println("✅ [CAM] Sensor OV2640 activo en QVGA (320x240) a 16 MHz con buffers DMA holgados.");
 
     // ------------------------------------------------------------------------
     // 4. INICIAR SERVIDORES HTTP Y FARO UDP

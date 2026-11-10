@@ -17,9 +17,9 @@ class MjpegParser(
         if (len <= 0) return emptyList()
 
         buffer.write(bytes, 0, len)
-        val data = buffer.toByteArray()
 
-        if (data.size > maxBufferSize) {
+        if (buffer.size() > maxBufferSize) {
+            val data = buffer.toByteArray()
             // Protección contra desbordamiento: buscar si hay algún SOI reciente en los últimos 64 KB
             val lastSoi = findLastSoi(data)
             buffer.reset()
