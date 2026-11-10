@@ -21,80 +21,12 @@ httpd_handle_t control_httpd = NULL;
 #if __has_include("esp_arduino_version.h")
 #include "esp_arduino_version.h"
 #endif
-
 // ----------------------------------------------------------------------------
-// Buzzer PWM (LEDC) - Compatible con ESP32 Arduino Core 2.x y 3.x
-// ----------------------------------------------------------------------------
-#define BUZZER_CHANNEL 1
-#define BUZZER_FREQ 2000
-#define BUZZER_RES 8
-
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR >= 3)
-// API para ESP32 Arduino Core 3.0+
-void setupBuzzer() {
-#if defined(BUZZER_PIN) && (BUZZER_PIN >= 0)
-    ledcAttach(BUZZER_PIN, BUZZER_FREQ, BUZZER_RES);
-    ledcWrite(BUZZER_PIN, 0);
-#endif
-}
-
-void setBuzzerState(int on, int duty) {
-#if defined(BUZZER_PIN) && (BUZZER_PIN >= 0)
-    if (on) {
-        ledcWrite(BUZZER_PIN, duty > 0 ? duty : 200);
-    } else {
-        ledcWrite(BUZZER_PIN, 0);
-    }
-#endif
-}
-
-void beepBuzzer(int duty, int duration_ms, int freq) {
-#if defined(BUZZER_PIN) && (BUZZER_PIN >= 0)
-    if (freq > 0) {
-        ledcAttach(BUZZER_PIN, freq, BUZZER_RES);
-    }
-    ledcWrite(BUZZER_PIN, duty > 0 ? duty : 200);
-    delay(duration_ms > 0 ? duration_ms : 100);
-    ledcWrite(BUZZER_PIN, 0);
-#endif
-}
-
-#else
-// API para ESP32 Arduino Core 2.x (Legacy)
-void setupBuzzer() {
-#if defined(BUZZER_PIN) && (BUZZER_PIN >= 0)
-    ledcSetup(BUZZER_CHANNEL, BUZZER_FREQ, BUZZER_RES);
-    ledcAttachPin(BUZZER_PIN, BUZZER_CHANNEL);
-    ledcWrite(BUZZER_CHANNEL, 0);
-#endif
-}
-
-void setBuzzerState(int on, int duty) {
-#if defined(BUZZER_PIN) && (BUZZER_PIN >= 0)
-    if (on) {
-        ledcWrite(BUZZER_CHANNEL, duty > 0 ? duty : 200);
-    } else {
-        ledcWrite(BUZZER_CHANNEL, 0);
-    }
-#endif
-}
-
-void beepBuzzer(int duty, int duration_ms, int freq) {
-#if defined(BUZZER_PIN) && (BUZZER_PIN >= 0)
-    if (freq > 0) {
-        ledcSetup(BUZZER_CHANNEL, freq, BUZZER_RES);
-    }
-    ledcWrite(BUZZER_CHANNEL, duty > 0 ? duty : 200);
-    delay(duration_ms > 0 ? duration_ms : 100);
-    ledcWrite(BUZZER_CHANNEL, 0);
-#endif
-}
-#endif
-
-// ----------------------------------------------------------------------------
-// Handler: /stream (Puerto 81 - MJPEG de Alta Velocidad)
+// Handler: /stream (Puerto 81 - MJPEG de Alta Velocidad con Desacople DMA)
 // ----------------------------------------------------------------------------
 static volatile bool s_client_streaming = false;
+static const size_t STREAM_TX_BUF_SIZE = 65536; // 64 KB en PSRAM para empaquetado contiguo
+static uint8_t *s_tx_buf = NULL;
 
 bool isClientStreaming() {
     return s_client_streaming;
@@ -105,7 +37,17 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     esp_err_t res = ESP_OK;
     char part_buf[128];
 
-    // Optimización de baja latencia: desactivar algoritmo de Nagle (TCP_NODELAY)
+    // Reservar buffer de transmisión contiguo en PSRAM (una sola vez)
+    if (s_tx_buf == NULL) {
+        if (psramFound()) {
+            s_tx_buf = (uint8_t *)ps_malloc(STREAM_TX_BUF_SIZE);
+        }
+        if (s_tx_buf == NULL) {
+            s_tx_buf = (uint8_t *)malloc(STREAM_TX_BUF_SIZE);
+        }
+    }
+
+    // Optimización de socket TCP para streaming continuo sin fragmentación excesiva
     int sockfd = httpd_req_to_sockfd(req);
     if (sockfd >= 0) {
         int nodelay = 1;
@@ -116,12 +58,13 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     if (res != ESP_OK) return res;
 
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
     httpd_resp_set_hdr(req, "X-Framerate", "30");
 
     s_client_streaming = true;
 
     while (true) {
-        // Obtener fotograma del buffer DMA (sincronizado por hardware VSYNC del OV2640 a ~30 FPS)
+        // 1. Obtener fotograma del buffer DMA (sincronizado por VSYNC del OV2640)
         fb = esp_camera_fb_get();
         if (!fb) {
             res = ESP_FAIL;
@@ -129,25 +72,43 @@ static esp_err_t stream_handler(httpd_req_t *req) {
         }
 
         if (fb->format == PIXFORMAT_JPEG) {
-            size_t hlen = snprintf(part_buf, sizeof(part_buf), 
-                                   "\r\n--" PART_BOUNDARY "\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", 
-                                   fb->len);
-            res = httpd_resp_send_chunk(req, part_buf, hlen);
-            if (res == ESP_OK) {
-                res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+            size_t jpg_len = fb->len;
+            size_t hlen = snprintf(part_buf, sizeof(part_buf),
+                                   "\r\n--" PART_BOUNDARY "\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n",
+                                   (unsigned int)jpg_len);
+
+            if (s_tx_buf != NULL && (hlen + jpg_len) <= STREAM_TX_BUF_SIZE) {
+                // 2. DESACOPLE INMEDIATO DE DMA: Copiar cabecera + JPEG a memoria de transmisión (~15 us)
+                // y liberar el buffer DMA de la cámara ANTES de transmitir por Wi-Fi.
+                // Así las fluctuaciones de red nunca bloquean al sensor OV2640.
+                memcpy(s_tx_buf, part_buf, hlen);
+                memcpy(s_tx_buf + hlen, fb->buf, jpg_len);
+                esp_camera_fb_return(fb);
+                fb = NULL;
+
+                // 3. Envío en UN SOLO chunk contiguo (reduce llamadas a socket TCP a la mitad)
+                res = httpd_resp_send_chunk(req, (const char *)s_tx_buf, hlen + jpg_len);
+            } else {
+                // Fallback directo si el frame superara 64 KB
+                res = httpd_resp_send_chunk(req, part_buf, hlen);
+                if (res == ESP_OK) {
+                    res = httpd_resp_send_chunk(req, (const char *)fb->buf, jpg_len);
+                }
+                esp_camera_fb_return(fb);
+                fb = NULL;
             }
+        } else {
+            esp_camera_fb_return(fb);
+            fb = NULL;
         }
 
-        esp_camera_fb_return(fb);
-        fb = NULL;
-
         if (res != ESP_OK) {
-            // El cliente cerró la pestaña del navegador
+            // El cliente cerró la conexión
             break;
         }
 
-        // Ceder 1 tick real de FreeRTOS (10ms) a la pila Wi-Fi LwIP para vaciar paquetes TCP sin colapso
-        vTaskDelay(1);
+        // Ceder brevemente el paso al planificador sin introducir retrasos fijos de 10ms
+        taskYIELD();
     }
 
     s_client_streaming = false;
@@ -206,46 +167,13 @@ static esp_err_t control_handler(httpd_req_t *req) {
                     else if (!strcmp(var, "contrast")) s->set_contrast(s, int_val);
                     else if (!strcmp(var, "brightness")) s->set_brightness(s, int_val);
                     else if (!strcmp(var, "saturation")) s->set_saturation(s, int_val);
+                    else if (!strcmp(var, "gainceiling")) s->set_gainceiling(s, (gainceiling_t)int_val);
+                    else if (!strcmp(var, "lenc")) s->set_lenc(s, int_val);
+                    else if (!strcmp(var, "wb_mode")) s->set_wb_mode(s, int_val);
                 }
             }
         }
         free(buf);
-    }
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    return httpd_resp_send(req, "OK", 2);
-}
-
-// ----------------------------------------------------------------------------
-// Handler: /buzzer (Puerto 80 - Control de Proximidad)
-// ----------------------------------------------------------------------------
-static esp_err_t buzzer_handler(httpd_req_t *req) {
-    char *buf = NULL;
-    size_t buf_len = httpd_req_get_url_query_len(req) + 1;
-    if (buf_len > 1) {
-        buf = (char *)malloc(buf_len);
-        if (buf && httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
-            char on_val[8] = {0};
-            char duty_val[8] = {0};
-            char beep_val[8] = {0};
-            char freq_val[8] = {0};
-
-            int duty = 200;
-            if (httpd_query_key_value(buf, "duty", duty_val, sizeof(duty_val)) == ESP_OK) {
-                duty = atoi(duty_val);
-            }
-
-            if (httpd_query_key_value(buf, "beep", beep_val, sizeof(beep_val)) == ESP_OK) {
-                int dur = atoi(beep_val);
-                int freq = 2000;
-                if (httpd_query_key_value(buf, "freq", freq_val, sizeof(freq_val)) == ESP_OK) {
-                    freq = atoi(freq_val);
-                }
-                beepBuzzer(duty, dur, freq);
-            } else if (httpd_query_key_value(buf, "on", on_val, sizeof(on_val)) == ESP_OK) {
-                setBuzzerState(atoi(on_val), duty);
-            }
-        }
-        if (buf) free(buf);
     }
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     return httpd_resp_send(req, "OK", 2);
@@ -265,8 +193,6 @@ static esp_err_t whoami_handler(httpd_req_t *req) {
 // Inicialización de Servidores HTTP (Puertos 80 y 81)
 // ----------------------------------------------------------------------------
 void startCameraServer() {
-    setupBuzzer();
-
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 8;
     config.stack_size = 8192;
@@ -290,12 +216,6 @@ void startCameraServer() {
         .handler   = control_handler,
         .user_ctx  = NULL
     };
-    httpd_uri_t buzzer_uri = {
-        .uri       = "/buzzer",
-        .method    = HTTP_GET,
-        .handler   = buzzer_handler,
-        .user_ctx  = NULL
-    };
     httpd_uri_t whoami_uri = {
         .uri       = "/whoami",
         .method    = HTTP_GET,
@@ -314,7 +234,6 @@ void startCameraServer() {
     if (httpd_start(&control_httpd, &config) == ESP_OK) {
         httpd_register_uri_handler(control_httpd, &status_uri);
         httpd_register_uri_handler(control_httpd, &control_uri);
-        httpd_register_uri_handler(control_httpd, &buzzer_uri);
         httpd_register_uri_handler(control_httpd, &whoami_uri);
         httpd_register_uri_handler(control_httpd, &root_uri);
         Serial.println("  [HTTP] Servidor de control iniciado en puerto 80.");

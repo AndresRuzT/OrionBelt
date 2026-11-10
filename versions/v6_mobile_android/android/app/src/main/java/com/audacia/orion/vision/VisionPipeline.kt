@@ -10,6 +10,9 @@ import com.audacia.orion.feedback.FeedbackSettings
 import com.audacia.orion.net.MjpegStreamReader
 import com.audacia.orion.net.XiaoDiscovery
 import com.audacia.orion.net.XiaoEndpoint
+import com.audacia.orion.resilience.CameraWatchdog
+import com.audacia.orion.resilience.ThermalGovernor
+import com.audacia.orion.resilience.WatchdogState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +53,10 @@ class VisionPipeline(
     private val discovery = XiaoDiscovery(context)
     private val streamReader = MjpegStreamReader()
     val feedback = FeedbackCoordinator(context)
+    val watchdog = CameraWatchdog(timeoutMs = 3500L)
+    val thermalGovernor = ThermalGovernor(context, feedback.voice) { level ->
+        _state.update { it.copy(thermalLevel = level) }
+    }
 
     private var pipelineJob: Job? = null
     private var demoJob: Job? = null
@@ -102,6 +109,7 @@ class VisionPipeline(
     fun startAutoDiscovery() {
         stop(silent = true)
         pipelineJob = scope.launch(Dispatchers.IO) {
+            var backoffMs = 500L
             while (isActive) {
                 _state.update {
                     it.copy(
@@ -120,21 +128,26 @@ class VisionPipeline(
                 if (!isActive) break
 
                 // 2. Transmitir stream desde el endpoint descubierto
-                try {
+                val streamOk = try {
                     streamFromEndpoint(endpoint)
                 } catch (e: CancellationException) {
                     break
                 }
 
-                // 3. Si el stream se interrumpió y seguimos activos, esperar brevemente antes de reintentar
+                // 3. Si el stream se interrumpió y seguimos activos, esperar con backoff exponencial (0.5 -> 1 -> 2 -> 4s)
                 if (isActive) {
+                    if (streamOk) {
+                        backoffMs = 500L
+                    } else {
+                        delay(backoffMs)
+                        backoffMs = (backoffMs * 2).coerceAtMost(4000L)
+                    }
                     _state.update {
                         it.copy(
                             connectionStatus = ConnectionStatus.SEARCHING,
-                            statusMessage = "Conexión perdida. Reintentando autoconexión..."
+                            statusMessage = "Reintentando autoconexión (${backoffMs}ms)..."
                         )
                     }
-                    delay(1200)
                 }
             }
         }
@@ -215,10 +228,12 @@ class VisionPipeline(
      */
     private suspend fun streamFromEndpoint(endpoint: XiaoEndpoint): Boolean {
         discovery.saveLastKnownEndpoint(endpoint)
+        watchdog.reset()
         _state.update {
             it.copy(
                 endpoint = endpoint,
                 connectionStatus = ConnectionStatus.CONNECTING,
+                watchdogState = WatchdogState.OK,
                 statusMessage = "Conectando stream en ${endpoint.streamUrl}..."
             )
         }
@@ -229,27 +244,57 @@ class VisionPipeline(
         }
 
         var hasDeliveredFrame = false
+        var watchdogTriggered = false
+
+        // Supervisor activo del watchdog: detecta congelamiento del socket sin cierre TCP (>3500ms)
+        val watchdogJob = scope.launch(Dispatchers.Default) {
+            while (isActive) {
+                delay(400)
+                if (hasDeliveredFrame) {
+                    val ws = watchdog.check()
+                    if (ws == WatchdogState.LOST) {
+                        watchdogTriggered = true
+                        feedback.onCameraLost()
+                        _state.update {
+                            it.copy(
+                                watchdogState = WatchdogState.LOST,
+                                statusMessage = "Watchdog: Sin frames en > 3.5s"
+                            )
+                        }
+                        break
+                    }
+                }
+            }
+        }
+
         try {
             // Flujo productor de frames desde MJPEG
             streamReader.streamFrames(endpoint).collect { frameBytes ->
+                if (watchdogTriggered) {
+                    throw CancellationException("Watchdog: timeout de 3500 ms alcanzado")
+                }
+                watchdog.onFrame()
                 if (!hasDeliveredFrame) {
                     hasDeliveredFrame = true
                     _state.update {
                         it.copy(
                             connectionStatus = ConnectionStatus.STREAMING,
+                            watchdogState = WatchdogState.OK,
                             statusMessage = "Stream activo (${endpoint.ip})"
                         )
                     }
                     feedback.onCameraConnected()
+                } else if (_state.value.watchdogState == WatchdogState.LOST) {
+                    _state.update { it.copy(watchdogState = WatchdogState.OK) }
                 }
                 // Channel.CONFLATED descarta automáticamente frames acumulados si el consumidor está ocupado
                 frameChannel.trySend(frameBytes)
             }
-            return true
+            return !watchdogTriggered
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (hasDeliveredFrame) {
+            if (hasDeliveredFrame && !watchdogTriggered) {
                 feedback.onCameraDisconnected()
             }
             _state.update {
@@ -260,6 +305,7 @@ class VisionPipeline(
             }
             return false
         } finally {
+            watchdogJob.cancel()
             consumerJob.cancel()
         }
     }
@@ -316,6 +362,16 @@ class VisionPipeline(
             val totalLatencyMs = (totalEnd - totalStart) / 1_000_000
             frameCount++
             fpsFrameCounter++
+
+            // Control térmico de velocidad de frames (ThermalGovernor)
+            val minInterval = thermalGovernor.minFrameIntervalMs
+            if (minInterval > 0) {
+                val computeMs = totalLatencyMs
+                val remainingDelay = minInterval - computeMs
+                if (remainingDelay > 0) {
+                    delay(remainingDelay)
+                }
+            }
 
             val now = System.currentTimeMillis()
             val elapsedMs = now - fpsLastTime
@@ -512,6 +568,7 @@ class VisionPipeline(
 
     override fun close() {
         stop(silent = true)
+        thermalGovernor.close()
         feedback.close()
         depthEstimator?.close()
     }

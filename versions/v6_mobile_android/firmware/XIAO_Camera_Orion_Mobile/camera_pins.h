@@ -23,7 +23,4 @@
 #define HREF_GPIO_NUM  47
 #define PCLK_GPIO_NUM  13
 
-// Pin para Buzzer pasivo/activo en placa de expansión XIAO (opcional)
-#define BUZZER_PIN     2
-
 #endif // CAMERA_PINS_H_

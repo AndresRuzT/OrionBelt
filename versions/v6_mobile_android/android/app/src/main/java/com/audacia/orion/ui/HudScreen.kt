@@ -29,7 +29,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -41,6 +44,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -56,6 +60,8 @@ import androidx.compose.ui.unit.sp
 import com.audacia.orion.R
 import com.audacia.orion.feedback.Alert
 import com.audacia.orion.feedback.FeedbackSettings
+import com.audacia.orion.resilience.ThermalThrottleLevel
+import com.audacia.orion.resilience.WatchdogState
 import com.audacia.orion.vision.Action
 import com.audacia.orion.vision.ConnectionStatus
 import com.audacia.orion.vision.InferenceBackend
@@ -66,10 +72,15 @@ import com.audacia.orion.vision.ZoneResult
 @Composable
 fun HudScreen(
     viewModel: HudViewModel,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onRequestBatteryOptimization: () -> Unit = {},
+    isBatteryOptimizationIgnored: Boolean = true,
+    onOpenAppSettings: () -> Unit = {},
+    onCloseApp: () -> Unit = {}
 ) {
     val state by viewModel.state.collectAsState()
     val scrollState = rememberScrollState()
+    var showBatteryTip by remember { mutableStateOf(true) }
 
     Column(
         modifier = modifier
@@ -79,21 +90,35 @@ fun HudScreen(
             .verticalScroll(scrollState),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // --- 1. BARRA SUPERIOR: ESTADO Y BACKEND ---
+        // --- 1. BARRA SUPERIOR: ESTADO, CONTROL TÉRMICO Y BACKEND ---
         TopHudHeader(
             state = state,
             onBackendToggle = {
                 val next = if (state.activeBackend == InferenceBackend.GPU) InferenceBackend.CPU else InferenceBackend.GPU
                 viewModel.switchBackend(next)
-            }
+            },
+            onRequestBatteryOptimization = onRequestBatteryOptimization,
+            isBatteryOptimizationIgnored = isBatteryOptimizationIgnored,
+            onOpenAppSettings = onOpenAppSettings,
+            onCloseApp = onCloseApp
         )
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // --- 2. BANNER DE NAVEGACIÓN Y ALERTA (FORWARD / STOP) ---
+        // Sugerencia para excluir optimización de batería en Modo Bolsillo
+        if (!isBatteryOptimizationIgnored && showBatteryTip) {
+            PocketModeBatteryTipCard(
+                onConfigure = onRequestBatteryOptimization,
+                onDismiss = { showBatteryTip = false }
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+
+        // --- 2. BANNER DE NAVEGACIÓN Y ALERTA (FORWARD / STOP / WATCHDOG) ---
         ActionAlertBanner(
             zoneResult = state.zoneResult,
-            alert = state.activeAlert
+            alert = state.activeAlert,
+            watchdogState = state.watchdogState
         )
 
         Spacer(modifier = Modifier.height(10.dp))
@@ -157,7 +182,11 @@ fun HudScreen(
 @Composable
 fun TopHudHeader(
     state: VisionState,
-    onBackendToggle: () -> Unit
+    onBackendToggle: () -> Unit,
+    onRequestBatteryOptimization: () -> Unit = {},
+    isBatteryOptimizationIgnored: Boolean = true,
+    onOpenAppSettings: () -> Unit = {},
+    onCloseApp: () -> Unit = {}
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -205,31 +234,124 @@ fun TopHudHeader(
             }
         }
 
-        // Chip selector de Backend (GPU / CPU)
-        val isGpu = state.activeBackend == InferenceBackend.GPU
-        val backendColor = if (isGpu) Color(0xFF10B981) else Color(0xFFF59E0B)
-        Box(
-            modifier = Modifier
-                .clip(RoundedCornerShape(6.dp))
-                .background(backendColor.copy(alpha = 0.15f))
-                .border(1.dp, backendColor.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
-                .clickable { onBackendToggle() }
-                .padding(horizontal = 10.dp, vertical = 5.dp)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // Indicador de Throttling Térmico si se activa
+            if (state.thermalLevel != ThermalThrottleLevel.NOMINAL) {
+                val (thermalColor, thermalText) = when (state.thermalLevel) {
+                    ThermalThrottleLevel.MODERATE -> Pair(Color(0xFFF59E0B), "12 FPS")
+                    ThermalThrottleLevel.SEVERE -> Pair(Color(0xFFEF4444), "8 FPS")
+                    else -> Pair(Color(0xFF10B981), "NOMINAL")
+                }
                 Box(
                     modifier = Modifier
-                        .size(5.dp)
-                        .background(backendColor, CircleShape)
-                )
-                Spacer(modifier = Modifier.width(5.dp))
-                Text(
-                    text = if (isGpu) "GPU ACCEL" else "CPU (4H)",
-                    color = backendColor,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(thermalColor.copy(alpha = 0.15f))
+                        .border(1.dp, thermalColor.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                        .padding(horizontal = 7.dp, vertical = 5.dp)
+                ) {
+                    Text(
+                        text = "TERM: $thermalText",
+                        color = thermalColor,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+
+            // Chip selector de Backend (GPU / CPU)
+            val isGpu = state.activeBackend == InferenceBackend.GPU
+            val backendColor = if (isGpu) Color(0xFF10B981) else Color(0xFFF59E0B)
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(backendColor.copy(alpha = 0.15f))
+                    .border(1.dp, backendColor.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                    .clickable { onBackendToggle() }
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(5.dp)
+                            .background(backendColor, CircleShape)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = if (isGpu) "GPU ACCEL" else "CPU (4H)",
+                        color = backendColor,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+
+            // Menú de 3 puntos (Permisos de segundo plano / Cerrar app)
+            var showOverflowMenu by remember { mutableStateOf(false) }
+            Box {
+                IconButton(
+                    onClick = { showOverflowMenu = true },
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_more_vert),
+                        contentDescription = "Opciones",
+                        tint = Color(0xFF94A3B8),
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                DropdownMenu(
+                    expanded = showOverflowMenu,
+                    onDismissRequest = { showOverflowMenu = false },
+                    modifier = Modifier
+                        .background(Color(0xFF1E293B))
+                        .border(1.dp, Color(0xFF334155), RoundedCornerShape(8.dp))
+                ) {
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(
+                                    text = "Segundo Plano (Batería)",
+                                    fontSize = 12.sp,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = if (isBatteryOptimizationIgnored) "Permitido (Sin restricciones)" else "Restringido (Optimizado)",
+                                    fontSize = 10.sp,
+                                    color = if (isBatteryOptimizationIgnored) Color(0xFF10B981) else Color(0xFFF59E0B)
+                                )
+                            }
+                        },
+                        onClick = {
+                            showOverflowMenu = false
+                            onRequestBatteryOptimization()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text("Permisos del Sistema", fontSize = 12.sp, color = Color.White)
+                        },
+                        onClick = {
+                            showOverflowMenu = false
+                            onOpenAppSettings()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Text("Cerrar Aplicación", fontSize = 12.sp, color = Color(0xFFF87171), fontWeight = FontWeight.Bold)
+                        },
+                        onClick = {
+                            showOverflowMenu = false
+                            onCloseApp()
+                        }
+                    )
+                }
             }
         }
     }
@@ -238,11 +360,17 @@ fun TopHudHeader(
 @Composable
 fun ActionAlertBanner(
     zoneResult: ZoneResult?,
-    alert: Alert?
+    alert: Alert?,
+    watchdogState: WatchdogState = WatchdogState.OK
 ) {
-    val isStop = zoneResult?.action == Action.STOP
+    val isLost = watchdogState == WatchdogState.LOST
+    val isStop = zoneResult?.action == Action.STOP && !isLost
     val bgColor by animateColorAsState(
-        targetValue = if (isStop) Color(0xFFDC2626) else Color(0xFF047857),
+        targetValue = when {
+            isLost -> Color(0xFF991B1B)
+            isStop -> Color(0xFFDC2626)
+            else -> Color(0xFF047857)
+        },
         animationSpec = tween(durationMillis = 200),
         label = "alert_bg_anim"
     )
@@ -264,7 +392,13 @@ fun ActionAlertBanner(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
-                    painter = painterResource(if (isStop) R.drawable.ic_alert_stop else R.drawable.ic_forward),
+                    painter = painterResource(
+                        when {
+                            isLost -> R.drawable.ic_disconnect
+                            isStop -> R.drawable.ic_alert_stop
+                            else -> R.drawable.ic_forward
+                        }
+                    ),
                     contentDescription = null,
                     tint = Color.White,
                     modifier = Modifier.size(24.dp)
@@ -272,22 +406,28 @@ fun ActionAlertBanner(
                 Spacer(modifier = Modifier.width(10.dp))
                 Column {
                     Text(
-                        text = if (isStop) "STOP DETECTADO" else "AVANZAR",
+                        text = when {
+                            isLost -> "SEÑAL PERDIDA"
+                            isStop -> "STOP DETECTADO"
+                            else -> "AVANZAR"
+                        },
                         color = Color.White,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.ExtraBold,
                         fontFamily = FontFamily.Monospace
                     )
                     Text(
-                        text = if (isStop) {
-                            if (alert != null) {
-                                "Nivel ${alert.level} (${alert.intervalMs} ms) • Zona ${alert.zone.name}"
-                            } else {
-                                val zoneName = zoneResult?.nearestZone?.name ?: "OBSTÁCULO FRONTAL"
-                                "Zona crítica: $zoneName"
+                        text = when {
+                            isLost -> "Sin frames en > 3.5s • Reconectando..."
+                            isStop -> {
+                                if (alert != null) {
+                                    "Nivel ${alert.level} (${alert.intervalMs} ms) • Zona ${alert.zone.name}"
+                                } else {
+                                    val zoneName = zoneResult?.nearestZone?.name ?: "OBSTÁCULO FRONTAL"
+                                    "Zona crítica: $zoneName"
+                                }
                             }
-                        } else {
-                            "Trayectoria libre de obstáculos"
+                            else -> "Trayectoria libre de obstáculos"
                         },
                         color = Color.White.copy(alpha = 0.85f),
                         fontSize = 11.sp
@@ -295,7 +435,7 @@ fun ActionAlertBanner(
                 }
             }
 
-            if (isStop) {
+            if (isStop && !isLost) {
                 val pct = ((zoneResult?.intensity ?: 0f) * 100).toInt()
                 Text(
                     text = "$pct%",
@@ -546,11 +686,10 @@ fun SensoryFeedbackCard(
                 val activeCount = listOf(
                     settings.hapticEnabled,
                     settings.audioEnabled,
-                    settings.buzzerEnabled,
                     settings.voiceEnabled
                 ).count { it }
                 Text(
-                    text = "$activeCount/4 ACTIVOS",
+                    text = "$activeCount/3 ACTIVOS",
                     color = Color(0xFF38BDF8),
                     fontSize = 9.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -562,7 +701,7 @@ fun SensoryFeedbackCard(
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 CompactFeedbackToggle(
                     modifier = Modifier.weight(1f),
@@ -577,13 +716,6 @@ fun SensoryFeedbackCard(
                     label = "Audio",
                     enabled = settings.audioEnabled,
                     onToggle = { onUpdateSettings(settings.copy(audioEnabled = !settings.audioEnabled)) }
-                )
-                CompactFeedbackToggle(
-                    modifier = Modifier.weight(1f),
-                    drawableRes = R.drawable.ic_buzzer,
-                    label = "Buzzer",
-                    enabled = settings.buzzerEnabled,
-                    onToggle = { onUpdateSettings(settings.copy(buzzerEnabled = !settings.buzzerEnabled)) }
                 )
                 CompactFeedbackToggle(
                     modifier = Modifier.weight(1f),
@@ -762,6 +894,63 @@ fun ControlButtonsSection(
                     fontWeight = FontWeight.SemiBold,
                     fontFamily = FontFamily.Monospace
                 )
+            }
+        }
+    }
+}
+
+@Composable
+fun PocketModeBatteryTipCard(
+    onConfigure: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF131C31)),
+        border = BorderStroke(1.dp, Color(0xFF38BDF8).copy(alpha = 0.4f))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Modo Bolsillo Continuo",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF38BDF8),
+                    fontFamily = FontFamily.Monospace
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Para evitar que Android duerma la detección con la pantalla apagada, puedes desactivar el ahorro de batería.",
+                    fontSize = 10.sp,
+                    color = Color(0xFFCBD5E1),
+                    lineHeight = 13.sp
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.height(30.dp),
+                    contentPadding = PaddingValues(horizontal = 6.dp)
+                ) {
+                    Text("Omitir", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                }
+                Button(
+                    onClick = onConfigure,
+                    modifier = Modifier.height(30.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
+                    shape = RoundedCornerShape(6.dp)
+                ) {
+                    Text("Ajustar", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                }
             }
         }
     }

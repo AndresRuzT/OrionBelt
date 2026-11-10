@@ -70,6 +70,22 @@ class HapticFeedback(context: Context) {
         }
     }
 
+    /**
+     * Emite una vibración larga y distintiva de advertencia cuando se pierde el enlace con la cámara.
+     * Patrón de dos pulsos largos (300 ms pulso - 100 ms pausa - 300 ms pulso a máxima intensidad).
+     */
+    fun playCameraLost() {
+        if (!isEnabled || vibrator == null || !vibrator.hasVibrator()) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val timings = longArrayOf(0, 300, 100, 300)
+            val amplitudes = intArrayOf(0, 255, 0, 255)
+            vibrator.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(longArrayOf(0, 300, 100, 300), -1)
+        }
+    }
+
     fun cancel() {
         vibrator?.cancel()
     }

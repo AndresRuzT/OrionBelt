@@ -87,7 +87,9 @@ bool attemptConnection(int index, unsigned long timeoutMs) {
         Serial.printf("   ⚙️ URL Control:  http://%s/status\n", WiFi.localIP().toString().c_str());
         Serial.printf("   📶 Intensidad:   %d dBm\n", WiFi.RSSI());
 
-        // Desactivar ahorro de energía (Modem-Sleep) para máxima estabilidad de frames
+        // Desactivar ahorro de energía (Modem-Sleep) en ambas capas (Arduino + ESP-IDF)
+        // para evitar pausas DTIM de 100-300 ms en el stream MJPEG
+        WiFi.setSleep(false);
         esp_wifi_set_ps(WIFI_PS_NONE);
         // Potencia equilibrada (17 dBm): previene recalentamiento del sensor OV2640
         WiFi.setTxPower(WIFI_POWER_17dBm);
@@ -102,6 +104,8 @@ bool attemptConnection(int index, unsigned long timeoutMs) {
 
 void connectWifiPriority() {
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
     WiFi.setAutoReconnect(false);
 
     // 1. FAST-PROBE: Probar primero la Red 0 (Celular principal) por 2.5 segundos
@@ -219,20 +223,22 @@ void setup() {
     config.pin_pwdn     = PWDN_GPIO_NUM;
     config.pin_reset    = RESET_GPIO_NUM;
 
-    // 16 MHz: Frecuencia óptima recomendada por Seeed Studio para máxima estabilidad térmica
-    config.xclk_freq_hz = 16000000;
+    // 20 MHz: Frecuencia maestra nativa para el reloj PLL del OV2640 en XIAO ESP32S3
+    config.xclk_freq_hz = 20000000;
     config.pixel_format = PIXFORMAT_JPEG;
 
-    // Resolución QVGA (320x240): Ultra ligera (~2.5 KB por frame con quality=20),
-    // reduce consumo de ancho de banda y latencia hacia el teléfono móvil.
-    config.frame_size   = FRAMESIZE_QVGA;
-    config.jpeg_quality = 20;
-
     if (has_psram) {
+        // Inicializar buffers DMA con tamaño VGA (~61 KB por buffer en PSRAM de 8 MB)
+        // para eliminar por completo cualquier riesgo de 'cam_hal: FB-OVF', y luego
+        // conmutar el sensor a QVGA (320x240) para máxima velocidad de transmisión.
+        config.frame_size   = FRAMESIZE_VGA;
+        config.jpeg_quality = 18;
         config.fb_count     = 3;                  // Triple buffer DMA en PSRAM
         config.grab_mode    = CAMERA_GRAB_LATEST; // Siempre entrega el fotograma más fresco sin retraso
         config.fb_location  = CAMERA_FB_IN_PSRAM;
     } else {
+        config.frame_size   = FRAMESIZE_QVGA;
+        config.jpeg_quality = 20;
         config.fb_count     = 2;
         config.grab_mode    = CAMERA_GRAB_LATEST;
         config.fb_location  = CAMERA_FB_IN_DRAM;
@@ -243,18 +249,27 @@ void setup() {
         Serial.printf("❌ [CAM] Error al inicializar cámara: 0x%x\n", err);
         return;
     }
-    Serial.println("✅ [CAM] Sensor OV2640 activo en QVGA (320x240) a 16 MHz.");
 
-    // Ajustes finos de imagen
+    // Configuración determinista de FPS constantes en el sensor OV2640:
     sensor_t *s = esp_camera_sensor_get();
     if (s != NULL) {
-        s->set_brightness(s, 1);
-        s->set_contrast(s, 1);
-        s->set_saturation(s, 0);
-        s->set_whitebal(s, 1);
-        s->set_awb_gain(s, 1);
-        s->set_exposure_ctrl(s, 1);
+        s->set_framesize(s, FRAMESIZE_QVGA);   // Salida QVGA (320x240) sobre buffers DMA de 61 KB (0 FB-OVF)
+        s->set_brightness(s, 1);               // Brillo digital (+1)
+        s->set_contrast(s, 1);                 // Contraste (+1)
+        s->set_saturation(s, 0);               // Saturación neutra (0)
+        s->set_whitebal(s, 1);                 // Balance de blancos automático (AWB)
+        s->set_awb_gain(s, 1);                 // Ganancia AWB activa
+        s->set_wb_mode(s, 0);                  // Modo AWB Auto
+        s->set_exposure_ctrl(s, 1);            // Exposición automática (AEC)
+        s->set_aec2(s, 0);                     // CRÍTICO: Desactivar Night-Mode DSP (impide dummy frames lentos de 500ms)
+        s->set_gain_ctrl(s, 1);                // CRÍTICO: Activar AGC para que AEC no alargue el obturador a 1 FPS en interiores
+        s->set_gainceiling(s, GAINCEILING_2X); // Techo mínimo 2X (0): imagen limpia (~2.5-3.5 KB) sin ruido excesivo
+        s->set_wpc(s, 1);                      // Corrección de píxeles blancos
+        s->set_raw_gma(s, 1);                  // Gamma de sensor activo
+        s->set_lenc(s, 1);                     // Corrección de lente
+        s->set_dcw(s, 1);                      // Downsize digital activo
     }
+    Serial.println("✅ [CAM] Sensor OV2640 activo en QVGA (320x240) a 20 MHz con buffers DMA holgados.");
 
     // ------------------------------------------------------------------------
     // 4. INICIAR SERVIDORES HTTP Y FARO UDP

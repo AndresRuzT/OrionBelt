@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import com.audacia.orion.feedback.Alert
 import com.audacia.orion.feedback.FeedbackSettings
 import com.audacia.orion.net.XiaoEndpoint
+import com.audacia.orion.resilience.ThermalThrottleLevel
+import com.audacia.orion.resilience.WatchdogState
 
 enum class ConnectionStatus {
     IDLE,
@@ -28,5 +30,7 @@ data class VisionState(
     val activeAlert: Alert? = null,
     val feedbackSettings: FeedbackSettings = FeedbackSettings(),
     val statusMessage: String = "Listo para iniciar",
-    val benchmarkSummary: String? = null
+    val benchmarkSummary: String? = null,
+    val watchdogState: WatchdogState = WatchdogState.OK,
+    val thermalLevel: ThermalThrottleLevel = ThermalThrottleLevel.NOMINAL
 )

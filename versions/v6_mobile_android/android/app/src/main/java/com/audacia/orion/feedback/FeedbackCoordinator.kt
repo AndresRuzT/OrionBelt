@@ -1,14 +1,12 @@
 package com.audacia.orion.feedback
 
 import android.content.Context
-import com.audacia.orion.net.BuzzerClient
 import com.audacia.orion.net.XiaoEndpoint
 import com.audacia.orion.vision.ZoneResult
 
 data class FeedbackSettings(
     val hapticEnabled: Boolean = true,
     val audioEnabled: Boolean = true,
-    val buzzerEnabled: Boolean = true,
     val voiceEnabled: Boolean = true
 )
 
@@ -16,7 +14,6 @@ data class FeedbackSettings(
  * Coordinador central de todos los canales de retroalimentación sensorial de ORION v6:
  * - Háptica direccional en el teléfono (vibración).
  * - Audio estéreo binaural en el teléfono (auriculares/altavoz).
- * - Buzzer remoto en el hardware del cinturón (XIAO ESP32S3).
  * - Avisos de voz TTS para estados del sistema.
  */
 class FeedbackCoordinator(
@@ -24,7 +21,6 @@ class FeedbackCoordinator(
     val alertPolicy: AlertPolicy = AlertPolicy(),
     val haptic: HapticFeedback = HapticFeedback(context),
     val audio: AudioFeedback = AudioFeedback(context),
-    val buzzer: BuzzerClient = BuzzerClient(),
     val voice: VoiceAnnouncer = VoiceAnnouncer(context)
 ) : AutoCloseable {
 
@@ -44,27 +40,16 @@ class FeedbackCoordinator(
 
     fun processFrameResult(
         result: ZoneResult,
-        endpoint: XiaoEndpoint?,
+        endpoint: XiaoEndpoint? = null,
         nowMs: Long = System.currentTimeMillis()
     ): Alert? {
         val alert = alertPolicy.update(result, nowMs)
         if (alert != null) {
-            // 1. Vibración háptica en el celular
+            // 1. Vibración háptica direccional en el celular
             haptic.play(alert)
 
-            // 2. Audio estéreo direccional en el celular
+            // 2. Audio estéreo direccional en el celular (binaural)
             audio.play(alert)
-
-            // 3. Buzzer físico en el cinturón (XIAO ESP32S3)
-            if (settings.buzzerEnabled && endpoint != null) {
-                val (freq, duration) = when (alert.level) {
-                    3 -> Pair(2400, 100)
-                    2 -> Pair(1900, 80)
-                    1 -> Pair(1400, 60)
-                    else -> Pair(900, 45)
-                }
-                buzzer.triggerBeep(endpoint, durationMs = duration, frequencyHz = freq)
-            }
         }
         return alert
     }
@@ -76,6 +61,17 @@ class FeedbackCoordinator(
     }
 
     fun onCameraDisconnected() {
+        if (settings.voiceEnabled) {
+            voice.announceCameraDisconnected()
+        }
+    }
+
+    /**
+     * Notificación cuando el CameraWatchdog detecta interrupción del stream (> 3500 ms).
+     * Emite vibración larga de alerta y anuncio por voz.
+     */
+    fun onCameraLost() {
+        haptic.playCameraLost()
         if (settings.voiceEnabled) {
             voice.announceCameraDisconnected()
         }
