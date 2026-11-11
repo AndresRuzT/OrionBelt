@@ -46,36 +46,76 @@ class DepthEstimator(
 
     init {
         val modelBuffer = loadModelFile(context, modelAssetName)
-        val options = Interpreter.Options()
+        var activeDelegate: GpuDelegate? = null
+        var activeInterpreter: Interpreter? = null
+        var backendResolved = InferenceBackend.CPU
 
-        var initializedGpu = false
         if (preferredBackend == InferenceBackend.GPU) {
             try {
-                val compatList = CompatibilityList()
-                if (compatList.isDelegateSupportedOnThisDevice) {
-                    val delegateOptions = compatList.bestOptionsForThisDevice.apply {
-                        setPrecisionLossAllowed(true) // FP16 nativo para máxima velocidad en shaders GPU
-                        setInferencePreference(GpuDelegateFactory.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
+                // Si CompatibilityList reconoce el dispositivo, usar sus opciones sugeridas.
+                // Si el dispositivo es un modelo reciente fuera de la whitelist estática de TFLite
+                // (ej: Motorola Edge 50/60 Fusion, Adreno/Mali modernos), NO bloquear la GPU:
+                // instanciar opciones estándar con precisión FP16 y velocidad sostenida.
+                val delegateOptions = try {
+                    val compatList = CompatibilityList()
+                    if (compatList.isDelegateSupportedOnThisDevice) {
+                        compatList.bestOptionsForThisDevice
+                    } else {
+                        GpuDelegateFactory.Options()
                     }
-                    val delegate = GpuDelegate(delegateOptions)
-                    options.addDelegate(delegate)
-                    gpuDelegate = delegate
-                    activeBackend = InferenceBackend.GPU
-                    initializedGpu = true
+                } catch (t: Throwable) {
+                    GpuDelegateFactory.Options()
+                }.apply {
+                    setPrecisionLossAllowed(true) // FP16 nativo para duplicar velocidad en shaders GPU
+                    setInferencePreference(GpuDelegateFactory.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
                 }
-            } catch (e: Exception) {
-                gpuDelegate = null
-                initializedGpu = false
+
+                val delegate = GpuDelegate(delegateOptions)
+                val gpuOptions = Interpreter.Options().apply {
+                    addDelegate(delegate)
+                }
+
+                // 1. Instanciar intérprete con aceleración GPU
+                val testInterpreter = Interpreter(modelBuffer.duplicate(), gpuOptions)
+
+                // 2. Verificación de ejecución: forzar compilación de shaders en GPU con un buffer de prueba
+                val testInput = ByteBuffer.allocateDirect(1 * outputWidth * outputHeight * 3 * 4)
+                    .order(ByteOrder.nativeOrder())
+                    .asFloatBuffer()
+                testInterpreter.run(testInput, outputBuffer)
+                outputBuffer.rewind()
+
+                activeDelegate = delegate
+                activeInterpreter = testInterpreter
+                backendResolved = InferenceBackend.GPU
+            } catch (t: Throwable) {
+                // Fallback elegante a CPU si el driver GPU falla
+                try {
+                    activeDelegate?.close()
+                } catch (ignored: Throwable) {}
+                activeDelegate = null
+                try {
+                    activeInterpreter?.close()
+                } catch (ignored: Throwable) {}
+                activeInterpreter = null
+                backendResolved = InferenceBackend.CPU
             }
         }
 
-        if (!initializedGpu) {
-            options.setUseXNNPACK(true)
-            options.setNumThreads(4)
-            activeBackend = InferenceBackend.CPU
+        // Si se seleccionó CPU o si la GPU no pudo compilar los shaders, inicializar CPU con XNNPACK
+        if (activeInterpreter == null) {
+            val cpuThreads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+            val cpuOptions = Interpreter.Options().apply {
+                setUseXNNPACK(true)
+                setNumThreads(cpuThreads)
+            }
+            activeInterpreter = Interpreter(modelBuffer.duplicate(), cpuOptions)
+            backendResolved = InferenceBackend.CPU
         }
 
-        interpreter = Interpreter(modelBuffer, options)
+        gpuDelegate = activeDelegate
+        interpreter = activeInterpreter
+        activeBackend = backendResolved
     }
 
     private fun loadModelFile(context: Context, assetName: String): ByteBuffer {
