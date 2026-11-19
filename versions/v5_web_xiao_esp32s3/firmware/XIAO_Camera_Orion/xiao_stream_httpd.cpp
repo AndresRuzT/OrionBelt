@@ -92,36 +92,104 @@ void beepBuzzer(int duty, int duration_ms, int freq) {
 #endif
 
 // ----------------------------------------------------------------------------
-// Handler: /stream (Puerto 81 - MJPEG de Alta Velocidad)
+// Handler: /stream (Puerto 81 - MJPEG de Alta Velocidad con Desacople DMA)
 // ----------------------------------------------------------------------------
 static volatile bool s_client_streaming = false;
+static const size_t STREAM_TX_BUF_SIZE = 65536; // 64 KB en PSRAM para empaquetado contiguo
+static const int64_t TARGET_FRAME_INTERVAL_US = 45000; // ~22 FPS sostenidos: óptimo para Wi-Fi 2.4 GHz institucional
+static uint8_t *s_tx_buf = NULL;
 
 bool isClientStreaming() {
     return s_client_streaming;
+}
+
+// Envía un bloque completo por el socket HTTP, pero si el buffer TCP de LwIP está lleno
+// al inicio del frame (sent == 0 tras timeout de SO_SNDTIMEO = 250 ms),
+// descarta limpiamente el frame ANTES de comenzar a enviarlo para evitar fragmentos corruptos.
+static esp_err_t send_frame_or_drop(httpd_req_t *req, const char *buf, size_t len, int *consecutive_drops) {
+    size_t sent = 0;
+    int partial_retries = 0;
+
+    while (sent < len) {
+        int ret = httpd_send(req, buf + sent, len - sent);
+        if (ret > 0) {
+            sent += (size_t)ret;
+            partial_retries = 0;
+            if (consecutive_drops) *consecutive_drops = 0;
+        } else if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (sent == 0) {
+                // No se ha enviado ni un solo byte de este frame y la cola TCP sigue ocupada (>250 ms):
+                // descartar el fotograma completo para no enviar datos rotos ni acumular latencia.
+                if (consecutive_drops) {
+                    (*consecutive_drops)++;
+                    if (*consecutive_drops > 16) {
+                        // Más de ~4.0s continuos sin poder transmitir: desconexión real de cliente
+                        return ESP_FAIL;
+                    }
+                }
+                return ESP_OK;
+            }
+            // Si ya se envió parte del frame (sent > 0), completar los bytes restantes
+            // para mantener intacta la frontera multipart/JPEG en el stream TCP sin corromper el parser.
+            if (++partial_retries > 10) {
+                return ESP_FAIL;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+        } else {
+            return ESP_FAIL;
+        }
+    }
+    return ESP_OK;
 }
 
 static esp_err_t stream_handler(httpd_req_t *req) {
     camera_fb_t *fb = NULL;
     esp_err_t res = ESP_OK;
     char part_buf[128];
+    int consecutive_drops = 0;
 
-    // Optimización de baja latencia: desactivar algoritmo de Nagle (TCP_NODELAY)
+    // Reservar buffer de transmisión contiguo en PSRAM (una sola vez)
+    if (s_tx_buf == NULL) {
+        if (psramFound()) {
+            s_tx_buf = (uint8_t *)ps_malloc(STREAM_TX_BUF_SIZE);
+        }
+        if (s_tx_buf == NULL) {
+            s_tx_buf = (uint8_t *)malloc(STREAM_TX_BUF_SIZE);
+        }
+    }
+
+    // Optimización de socket TCP: desactivar Nagle (TCP_NODELAY) en el emisor y fijar
+    // un timeout de envío calibrado a 250 ms (absorbe fluctuaciones normales de Wi-Fi institucional)
     int sockfd = httpd_req_to_sockfd(req);
     if (sockfd >= 0) {
         int nodelay = 1;
         setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char *)&nodelay, sizeof(nodelay));
+
+        struct timeval snd_tv;
+        snd_tv.tv_sec = 0;
+        snd_tv.tv_usec = 250000; // 250 ms de margen para confirmar entrega en red con APs
+        setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &snd_tv, sizeof(snd_tv));
     }
 
-    res = httpd_resp_set_type(req, _STREAM_CONTENT_TYPE);
-    if (res != ESP_OK) return res;
+    // Enviar cabecera HTTP 200 OK directa (sin Transfer-Encoding: chunked) para evitar
+    // los micro-paquetes de 2 y 5 bytes que saturan los 16 slots de TCP_SND_QUEUELEN en LwIP
+    static const char *STREAM_HTTP_HEADER =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: multipart/x-mixed-replace;boundary=" PART_BOUNDARY "\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n"
+        "Connection: close\r\n"
+        "X-Framerate: 22\r\n\r\n";
 
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "X-Framerate", "30");
+    res = send_frame_or_drop(req, STREAM_HTTP_HEADER, strlen(STREAM_HTTP_HEADER), &consecutive_drops);
+    if (res != ESP_OK) return res;
 
     s_client_streaming = true;
 
     while (true) {
-        // Obtener fotograma del buffer DMA (sincronizado por hardware VSYNC del OV2640 a ~30 FPS)
+        int64_t frame_start_us = esp_timer_get_time();
+
+        // 1. Obtener fotograma del buffer DMA (sincronizado por hardware VSYNC del OV2640 a ~30 FPS)
         fb = esp_camera_fb_get();
         if (!fb) {
             res = ESP_FAIL;
@@ -129,25 +197,41 @@ static esp_err_t stream_handler(httpd_req_t *req) {
         }
 
         if (fb->format == PIXFORMAT_JPEG) {
+            size_t jpg_len = fb->len;
             size_t hlen = snprintf(part_buf, sizeof(part_buf), 
                                    "\r\n--" PART_BOUNDARY "\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", 
-                                   fb->len);
-            res = httpd_resp_send_chunk(req, part_buf, hlen);
-            if (res == ESP_OK) {
-                res = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+                                   (unsigned int)jpg_len);
+
+            if (s_tx_buf != NULL && (hlen + jpg_len) <= STREAM_TX_BUF_SIZE) {
+                // 2. DESACOPLE INMEDIATO DE DMA: Copiar cabecera + JPEG a memoria contigua (~15 us)
+                // y liberar el buffer DMA de la cámara ANTES de transmitir por Wi-Fi.
+                memcpy(s_tx_buf, part_buf, hlen);
+                memcpy(s_tx_buf + hlen, fb->buf, jpg_len);
+                esp_camera_fb_return(fb);
+                fb = NULL;
+
+                // 3. Envío directo en UN SOLO bloque contiguo con descarte si la cola TCP no acepta a tiempo
+                res = send_frame_or_drop(req, (const char *)s_tx_buf, hlen + jpg_len, &consecutive_drops);
+            } else {
+                esp_camera_fb_return(fb);
+                fb = NULL;
             }
+        } else {
+            esp_camera_fb_return(fb);
+            fb = NULL;
         }
 
-        esp_camera_fb_return(fb);
-        fb = NULL;
-
         if (res != ESP_OK) {
-            // El cliente cerró la pestaña del navegador
+            // El cliente cerró la pestaña del navegador o desconectó el socket
             break;
         }
 
-        // Ceder 1 tick real de FreeRTOS (10ms) a la pila Wi-Fi LwIP para vaciar paquetes TCP sin colapso
-        vTaskDelay(1);
+        // 4. Frame Pacing: regula la salida a ~22 FPS máx (45 ms/frame) y garantiza
+        // al menos 5-8 ms libres para que la tarea Wi-Fi/LwIP procese ACKs sin llenar la cola TCP
+        int64_t elapsed_us = esp_timer_get_time() - frame_start_us;
+        int64_t remaining_us = TARGET_FRAME_INTERVAL_US - elapsed_us;
+        uint32_t delay_ms = (remaining_us > 5000) ? (uint32_t)(remaining_us / 1000) : 5;
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 
     s_client_streaming = false;

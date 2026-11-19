@@ -28,6 +28,7 @@ def main():
     print("   Abre únicamente el Dashboard web de ORION (http://localhost:8000).")
     print("=" * 65)
     
+    device = os.getenv("DEVICE", "auto")
     script_path = str(Path(__file__).resolve().parent / "main.py")
     cmd = [
         sys.executable, script_path,

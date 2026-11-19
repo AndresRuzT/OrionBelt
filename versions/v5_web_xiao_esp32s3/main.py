@@ -560,15 +560,16 @@ class LatestFrameReader:
 
 class MjpegStreamReader:
     """
-    Lector de stream MJPEG de red con soporte de Transfer-Encoding: chunked
-    y validación estricta de integridad con PIL.
-    Descarta al 100% fotogramas truncados y corruptos (evitando pantallas en blanco y negro o glitchs).
+    Lector de stream MJPEG de red con parser robusto anti-corrupción.
+    Valida la integridad de cada fotograma (SOI 0xFFD8 / EOI 0xFFD9 y detección de frames
+    truncados) antes de almacenarlo, eliminando al 100% fotogramas partidos o dañados
+    por pérdidas de paquetes en redes Wi-Fi congestionadas (Audacia).
     """
     def __init__(self, url: str):
         self.url = url
         self.session = requests.Session()
         self.resp = None
-        self.latest = None
+        self.latest_jpeg_bytes = None
         self.lock = threading.Lock()
         self.stopped = False
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -577,7 +578,7 @@ class MjpegStreamReader:
         self.resp = self.session.get(
             self.url,
             stream=True,
-            timeout=(2.5, 6.0),
+            timeout=(3.0, 6.0),
             headers={"Connection": "keep-alive"},
         )
         try:
@@ -592,8 +593,11 @@ class MjpegStreamReader:
 
     def _run(self):
         buffer = bytearray()
+        MAX_BUFFER = 512 * 1024  # 512 KB máx para evitar fugas de memoria
+
         try:
-            for chunk in self.resp.iter_content(chunk_size=4096):
+            # Leer en bloques de 8192 bytes para alto rendimiento en streaming
+            for chunk in self.resp.iter_content(chunk_size=8192):
                 if self.stopped:
                     break
                 if not chunk:
@@ -601,43 +605,74 @@ class MjpegStreamReader:
 
                 buffer.extend(chunk)
 
-                # Extraer el fotograma más reciente disponible en el búfer (descarta frames obsoletos por lag de Wi-Fi)
+                if len(buffer) > MAX_BUFFER:
+                    # Protección contra desbordamiento: conservar solo desde el último SOI
+                    last_soi = buffer.rfind(b"\xff\xd8")
+                    if last_soi != -1:
+                        del buffer[:last_soi]
+                    else:
+                        buffer.clear()
+                        continue
+
                 latest_jpg = None
+
                 while not self.stopped:
-                    start = buffer.find(b"\xff\xd8")
-                    if start < 0:
-                        if len(buffer) > 200_000:
+                    soi = buffer.find(b"\xff\xd8")
+                    if soi == -1:
+                        if len(buffer) > 2:
                             del buffer[:-2]
                         break
 
-                    end = buffer.find(b"\xff\xd9", start + 2)
-                    if end < 0:
-                        if start > 0:
-                            del buffer[:start]
+                    # Verificar si hay un siguiente SOI antes de encontrar el EOI (fotograma previo truncado/corrupto)
+                    next_soi = buffer.find(b"\xff\xd8", soi + 2)
+                    eoi = buffer.find(b"\xff\xd9", soi + 2)
+
+                    if eoi == -1:
+                        # Si no hay EOI pero ya empezó otro frame (next_soi), descartar la cabeza rota
+                        if next_soi != -1:
+                            del buffer[:next_soi]
+                            continue
+                        # Esperar a que lleguen los bytes restantes de este fotograma
+                        if soi > 0:
+                            del buffer[:soi]
                         break
 
-                    candidate = bytes(buffer[start:end + 2])
-                    del buffer[:end + 2]
-                    if len(candidate) >= 800:
-                        latest_jpg = candidate
+                    # Si hay un siguiente SOI que comienza ANTES del EOI encontrado, el primer frame estaba incompleto
+                    if next_soi != -1 and next_soi < eoi:
+                        # Descartar el frame roto y reiniciar la búsqueda desde el nuevo SOI fresco
+                        del buffer[:next_soi]
+                        continue
 
-                # Decodificación única acelerada C++ SIMD del fotograma más reciente
+                    # Frame candidato íntegro delimitado por SOI y EOI
+                    frame_bytes = bytes(buffer[soi : eoi + 2])
+                    del buffer[:eoi + 2]
+
+                    # Validación de integridad estricta:
+                    # 1. Debe comenzar en \xff\xd8 y terminar exactamente en \xff\xd9
+                    # 2. Tamaño coherente para QVGA (mínimo 1500 bytes para descartar falsos positivos de metadatos)
+                    if len(frame_bytes) >= 1500 and frame_bytes.startswith(b"\xff\xd8") and frame_bytes.endswith(b"\xff\xd9"):
+                        latest_jpg = frame_bytes
+
+                # Almacenar únicamente los bytes crudos si el fotograma pasó la validación íntegra
                 if latest_jpg is not None and not self.stopped:
-                    try:
-                        frame = cv2.imdecode(np.frombuffer(latest_jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
-                        if frame is not None and frame.size > 0:
-                            with self.lock:
-                                self.latest = frame
-                    except Exception:
-                        pass
+                    with self.lock:
+                        self.latest_jpeg_bytes = latest_jpg
         except Exception:
             pass
 
     def read(self):
         with self.lock:
-            frame = self.latest
-            self.latest = None
-        return frame is not None, frame
+            raw_bytes = self.latest_jpeg_bytes
+            self.latest_jpeg_bytes = None
+        if raw_bytes is None:
+            return False, None
+        try:
+            frame = cv2.imdecode(np.frombuffer(raw_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame is not None and frame.size > 0 and frame.shape[0] >= 120 and frame.shape[1] >= 160:
+                return True, frame
+        except Exception:
+            pass
+        return False, None
 
     def release(self):
         self.stopped = True
@@ -665,7 +700,7 @@ class MjpegStreamReader:
 class DualCameraSourceManager:
     """
     Gestor con Histéresis y Control Anti-Flapping.
-    Conmuta de forma autónoma entre el XIAO ESP32S3 y la cámara local con confirmación de 8 frames
+    Conmuta de forma autónoma entre el XIAO ESP32S3 y la cámara local con confirmación de frames
     y tiempo de enfriamiento (cooldown) para evitar parpadeos descontrolados.
     Gestiona el ciclo de vida del hardware: apaga el LED/cámara local cuando XIAO está activo,
     y lo enciende cuando entra en modo Rollback.
@@ -704,9 +739,9 @@ class DualCameraSourceManager:
 
         self.last_xiao_frame_time = 0.0
         self.last_switch_time = 0.0
-        self.COOLDOWN_SECONDS = 1.0  # Reducido a 1.0s para reconexión ágil
-        self.XIAO_TIMEOUT_SECONDS = 3.5  # Aumentado a 3.5s para tolerar jitter de Wi-Fi sin desconectar
-        self.MIN_CONFIRMATION_FRAMES = 1  # 1 frame válido basta para confirmar stream en vivo
+        self.COOLDOWN_SECONDS = 1.5  # Tiempo de enfriamiento para estabilizar el enlace
+        self.XIAO_TIMEOUT_SECONDS = 5.0  # Tolerancia de 5.0s para absorber retransmisiones Wi-Fi sin flapping
+        self.MIN_CONFIRMATION_FRAMES = 2  # 2 frames válidos consecutivos requeridos antes de apagar cámara Mac
         self._last_fast_probe = 0.0
         self._last_broad_scan = time.monotonic()
         self._is_seeking = False
@@ -864,24 +899,29 @@ class DualCameraSourceManager:
         try:
             reader = MjpegStreamReader(self.xiao_stream_url).start()
             
-            # Tolerancia de hasta 3.0s para recibir el primer frame por Wi-Fi
+            # Tolerancia de hasta 3.5s y confirmación de frames válidos antes de apagar cámara de la Mac
             t0 = time.time()
-            while time.time() - t0 < 3.0:
+            confirmed = 0
+            latest_f = None
+            while time.time() - t0 < 3.5:
                 ok, frame = reader.read()
                 if ok and frame is not None and frame.size > 0:
-                    with self.lock:
-                        if self.xiao_reader:
-                            self.xiao_reader.release()
-                        self.xiao_reader = reader
-                        self.last_xiao_frame_time = time.monotonic()
-                        self.last_switch_time = time.monotonic()
-                        self.xiao_online = True
-                        self.active_source = "XIAO_ESP32S3"
-                        self.last_valid_frame = frame
-                    safe_print("\n🟢 [HOT-SWAP] ¡XIAO ESP32S3 verificado y enlazado! Conmutando a fuente primaria.")
-                    # Liberar la cámara local para apagar el LED y ahorrar recursos
-                    self._release_local_camera()
-                    return True
+                    confirmed += 1
+                    latest_f = frame
+                    if confirmed >= self.MIN_CONFIRMATION_FRAMES:
+                        with self.lock:
+                            if self.xiao_reader:
+                                self.xiao_reader.release()
+                            self.xiao_reader = reader
+                            self.last_xiao_frame_time = time.monotonic()
+                            self.last_switch_time = time.monotonic()
+                            self.xiao_online = True
+                            self.active_source = "XIAO_ESP32S3"
+                            self.last_valid_frame = latest_f
+                        safe_print("\n🟢 [HOT-SWAP] ¡XIAO ESP32S3 verificado y enlazado! Conmutando a fuente primaria.")
+                        # Liberar la cámara local para apagar el LED y ahorrar recursos
+                        self._release_local_camera()
+                        return True
                 time.sleep(0.02)
 
             reader.release()
@@ -1075,6 +1115,17 @@ class DualCameraSourceManager:
                 elif now - self.last_xiao_frame_time > self.XIAO_TIMEOUT_SECONDS:
                     if now - self.last_switch_time >= self.COOLDOWN_SECONDS:
                         self.trigger_rollback(f"Señal de XIAO ausente por >{self.XIAO_TIMEOUT_SECONDS}s")
+
+            # Absorber micro-baches de Wi-Fi manteniendo el último cuadro congelado con aviso sin flapping
+            if now - self.last_xiao_frame_time <= self.XIAO_TIMEOUT_SECONDS and self.last_valid_frame is not None:
+                if now - self.last_xiao_frame_time > 1.5:
+                    frozen = self.last_valid_frame.copy()
+                    cv2.putText(frozen, "RECONECTANDO XIAO...", (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 180, 255), 2, cv2.LINE_AA)
+                    time.sleep(0.015)
+                    return True, frozen, "XIAO_ESP32S3"
+                time.sleep(0.005)
+                return False, None, "XIAO_ESP32S3"
+
             return False, None, "XIAO_ESP32S3"
 
         # 3. Modo LOCAL (o AUTO en rollback)

@@ -67,6 +67,7 @@ void setup() {
     // ------------------------------------------------------------------------
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
+    esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
 
     Serial.printf("📡 [WIFI] Conectando directamente a '%s'...", ssid);
     WiFi.begin(ssid, password);
@@ -88,6 +89,8 @@ void setup() {
     // Desactivar permanentemente el modo de ahorro de energía (Modem-Sleep) de la radio Wi-Fi.
     // En ESP32 viene activo por defecto tras WiFi.begin y genera pausas de 150-200ms entre balizas DTIM.
     esp_wifi_set_ps(WIFI_PS_NONE);
+    // Fijar ancho de banda en HT20 (20 MHz) para máxima inmunidad contra interferencias en 2.4 GHz
+    esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
     // Configurar potencia equilibrada (17 dBm): excelente alcance sin sobrecalentar el sensor OV2640
     WiFi.setTxPower(WIFI_POWER_17dBm);
 
