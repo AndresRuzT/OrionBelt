@@ -112,10 +112,11 @@ class VisionPipeline(
         depthEstimator?.close()
         depthEstimator = try {
             val estimator = DepthEstimator(context, preferredBackend = backend)
+            val engineDesc = estimator.activeGpuEngine ?: estimator.activeBackend.name
             _state.update {
                 it.copy(
                     activeBackend = estimator.activeBackend,
-                    statusMessage = "IA Lista (${estimator.activeBackend})"
+                    statusMessage = "IA Lista ($engineDesc)"
                 )
             }
             estimator

@@ -29,8 +29,9 @@ class DepthEstimator(
     preferredBackend: InferenceBackend = InferenceBackend.GPU
 ) : AutoCloseable {
 
-    var activeBackend: InferenceBackend = InferenceBackend.CPU
-        private set
+    companion object {
+        private const val TAG = "OrionDepthEstimator"
+    }
 
     private var gpuDelegate: GpuDelegate? = null
     private val interpreter: Interpreter
@@ -43,67 +44,82 @@ class DepthEstimator(
         .asFloatBuffer()
 
     private val rawArray = FloatArray(outputWidth * outputHeight)
+    var activeBackend: InferenceBackend = InferenceBackend.CPU
+        private set
+    var activeGpuEngine: String? = null
+        private set
 
     init {
         val modelBuffer = loadModelFile(context, modelAssetName)
         var activeDelegate: GpuDelegate? = null
         var activeInterpreter: Interpreter? = null
         var backendResolved = InferenceBackend.CPU
+        var engineResolved: String? = null
 
         if (preferredBackend == InferenceBackend.GPU) {
-            try {
-                // Si CompatibilityList reconoce el dispositivo, usar sus opciones sugeridas.
-                // Si el dispositivo es un modelo reciente fuera de la whitelist estática de TFLite
-                // (ej: Motorola Edge 50/60 Fusion, Adreno/Mali modernos), NO bloquear la GPU:
-                // instanciar opciones estándar con precisión FP16 y velocidad sostenida.
-                val delegateOptions = try {
-                    val compatList = CompatibilityList()
-                    if (compatList.isDelegateSupportedOnThisDevice) {
-                        compatList.bestOptionsForThisDevice
-                    } else {
-                        GpuDelegateFactory.Options()
-                    }
-                } catch (t: Throwable) {
-                    GpuDelegateFactory.Options()
-                }.apply {
-                    setPrecisionLossAllowed(true) // FP16 nativo para duplicar velocidad en shaders GPU
+            // Estrategia de inicialización GPU en cascada:
+            // 1. OpenCL / Auto con FP16 (máximo rendimiento en chips Adreno/Mali)
+            // 2. OpenGL ES Compute Shaders explícito (estándar universal en Android 14/15,
+            //    inmune a restricciones de permisos en libOpenCL.so en Motorola Edge)
+            // 3. OpenGL ES con precisión completa FP32
+            val gpuAttempts = listOf(
+                Pair("OpenCL/Auto FP16", GpuDelegateFactory.Options().apply {
+                    setPrecisionLossAllowed(true)
                     setInferencePreference(GpuDelegateFactory.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
-                }
+                }),
+                Pair("OpenGL ES FP16", GpuDelegateFactory.Options().apply {
+                    setForceBackend(GpuDelegateFactory.Options.GpuBackend.OPENGL)
+                    setPrecisionLossAllowed(true)
+                    setInferencePreference(GpuDelegateFactory.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
+                }),
+                Pair("OpenGL ES FP32", GpuDelegateFactory.Options().apply {
+                    setForceBackend(GpuDelegateFactory.Options.GpuBackend.OPENGL)
+                    setPrecisionLossAllowed(false)
+                })
+            )
 
-                val delegate = GpuDelegate(delegateOptions)
-                val gpuOptions = Interpreter.Options().apply {
-                    addDelegate(delegate)
-                }
-
-                // 1. Instanciar intérprete con aceleración GPU
-                val testInterpreter = Interpreter(modelBuffer.duplicate(), gpuOptions)
-
-                // 2. Verificación de ejecución: forzar compilación de shaders en GPU con un buffer de prueba
-                val testInput = ByteBuffer.allocateDirect(1 * outputWidth * outputHeight * 3 * 4)
-                    .order(ByteOrder.nativeOrder())
-                    .asFloatBuffer()
-                testInterpreter.run(testInput, outputBuffer)
-                outputBuffer.rewind()
-
-                activeDelegate = delegate
-                activeInterpreter = testInterpreter
-                backendResolved = InferenceBackend.GPU
-            } catch (t: Throwable) {
-                // Fallback elegante a CPU si el driver GPU falla
+            for ((engineName, options) in gpuAttempts) {
+                var candidateDelegate: GpuDelegate? = null
+                var candidateInterpreter: Interpreter? = null
                 try {
-                    activeDelegate?.close()
-                } catch (ignored: Throwable) {}
-                activeDelegate = null
-                try {
-                    activeInterpreter?.close()
-                } catch (ignored: Throwable) {}
-                activeInterpreter = null
-                backendResolved = InferenceBackend.CPU
+                    android.util.Log.i(TAG, "Intentando inicializar aceleración GPU con $engineName...")
+                    candidateDelegate = GpuDelegate(options)
+                    val gpuOptions = Interpreter.Options().apply {
+                        addDelegate(candidateDelegate)
+                    }
+
+                    // 1. Instanciar intérprete con aceleración GPU
+                    val testInterpreter = Interpreter(modelBuffer.duplicate(), gpuOptions)
+
+                    // 2. Verificación de ejecución: forzar compilación de shaders en GPU con un buffer de prueba
+                    val testInput = ByteBuffer.allocateDirect(1 * outputWidth * outputHeight * 3 * 4)
+                        .order(ByteOrder.nativeOrder())
+                        .asFloatBuffer()
+                    outputBuffer.rewind()
+                    testInterpreter.run(testInput, outputBuffer)
+                    outputBuffer.rewind()
+
+                    activeDelegate = candidateDelegate
+                    activeInterpreter = testInterpreter
+                    backendResolved = InferenceBackend.GPU
+                    engineResolved = engineName
+                    android.util.Log.i(TAG, "¡Aceleración GPU inicializada exitosamente con $engineName!")
+                    break
+                } catch (t: Throwable) {
+                    android.util.Log.w(TAG, "Fallo al inicializar GPU con $engineName: ${t.message}", t)
+                    try {
+                        candidateInterpreter?.close()
+                    } catch (ignored: Throwable) {}
+                    try {
+                        candidateDelegate?.close()
+                    } catch (ignored: Throwable) {}
+                }
             }
         }
 
-        // Si se seleccionó CPU o si la GPU no pudo compilar los shaders, inicializar CPU con XNNPACK
+        // Si se seleccionó CPU o si todos los motores GPU fallaron, inicializar CPU con XNNPACK
         if (activeInterpreter == null) {
+            android.util.Log.i(TAG, "Iniciando motor CPU con aceleración XNNPACK...")
             val cpuThreads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
             val cpuOptions = Interpreter.Options().apply {
                 setUseXNNPACK(true)
@@ -111,11 +127,13 @@ class DepthEstimator(
             }
             activeInterpreter = Interpreter(modelBuffer.duplicate(), cpuOptions)
             backendResolved = InferenceBackend.CPU
+            engineResolved = "CPU (XNNPACK)"
         }
 
         gpuDelegate = activeDelegate
         interpreter = activeInterpreter
         activeBackend = backendResolved
+        activeGpuEngine = engineResolved
     }
 
     private fun loadModelFile(context: Context, assetName: String): ByteBuffer {
